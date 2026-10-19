@@ -33,7 +33,8 @@ test('the export schemas require a key for every change', function()
   expect(required['worktree.create']).to_equal({'repo', 'branch', 'key'})
   expect(required['worktree.remove']).to_equal({'path', 'key'})
   expect(required['worktree.open']).to_equal({'path', 'key'})
-  expect(required['worktree.discard']).to_equal({'operation', 'key'})
+  -- discard names its target with exactly one of operation or id (the plugin checks it).
+  expect(required['worktree.discard']).to_equal({'key'})
 end)
 
 test('only the hub may call hub.forward or view.*', function()

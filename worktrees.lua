@@ -403,16 +403,21 @@ local function discard(id)
   if checks[id] then checks[id]:kill(); checks[id] = nil end
   return finish(id, op, {status = 'discarded', discarded = true, path = op.path})
 end
--- worktree.discard and the panel's Discard button. target is an operation ID (the user: any
--- pending operation) or an operation key of the caller (an agent: only its own operations).
+-- worktree.discard and the panel's Discard button. The target is selected by exactly one of:
+-- - id: a full operation ID, any pending operation (the user's decision, LazyRex decisions.md:
+--   an agent may discard what the user can). The panel uses id.
+-- - operation: an operation key of the caller, resolved through its aliases (its own operations).
 -- The request key reserves its target before the target changes: a record
--- discard/<part(actor)><part(key)> = {fingerprint, id}. A retry with the same key discards the
--- reserved ID again, also after an alias change; another target with the same key conflicts, also
--- after an interruption. discard() derives the result from the target, so the record holds no result.
-local function discard_request(caller, target, key)
-  text(target, 'operation')
+-- discard/<part(actor)><part(key)> = {fingerprint, id}. The request key is the caller's own. A retry
+-- with the same key discards the reserved ID again, also after an alias change; another target or
+-- the other selector with the same key conflicts, also after an interruption. discard() derives
+-- the result from the target, so the record holds no result.
+local function discard_request(caller, selector, key)
+  local by_id, by_key = selector.id ~= nil, selector.operation ~= nil
+  if by_id == by_key then fail('invalid_input', 'Name the operation with exactly one of operation or id') end
+  local target = by_id and text(selector.id, 'id') or text(selector.operation, 'operation')
   key = text(key, 'key')
-  local fingerprint = 'discard-v1/' .. part(caller.user and 'id' or 'key') .. part(target)
+  local fingerprint = 'discard-v1/' .. part(by_id and 'id' or 'key') .. part(target)
   local record_keys = {}
   for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'discard/' .. part(alias) .. part(key) end
   local function reserved()
@@ -428,7 +433,7 @@ local function discard_request(caller, target, key)
   local id = reserved()
   if not id then
     id = target
-    if not caller.user then
+    if by_key then
       local state = catalog()
       id = nil
       for _, alias in ipairs(caller.aliases) do
@@ -500,6 +505,38 @@ local function refresh(repo_arg)
   if not repo_arg then snapshot = result; refresh_error = nil; pcall(invalidate) end
   return result
 end
+-- operations_page lists the pending operations (the panel's pending entries), every repository,
+-- sorted by ID, after the ID after (a position; it need not exist). A page holds at most 50
+-- entries and 32 KiB of encoded JSON. The size is checked before an entry is added. next is the
+-- last ID of the page when more entries follow. An entry that does not fit an empty page is
+-- returned in a compact form with its exact ID; one whose compact form does not fit is an error.
+local operations_limit, operations_bytes = 50, 32768
+local function operation_entry(id, op)
+  -- A pending row from an older version can have no actor: the field is left out.
+  return {id = id, kind = op.kind, phase = op.phase, path = op.path, branch = op.branch, actor = op.actor}
+end
+local function operations_page(after)
+  if after ~= nil then text(after, 'operations_after') end
+  local pending = catalog().pending
+  local ids = {}
+  for id in pairs(pending) do if after == nil or id > after then ids[#ids + 1] = id end end
+  table.sort(ids)
+  local page, used = {}, 2
+  for _, id in ipairs(ids) do
+    if #page == operations_limit then return page, page[#page].id end
+    local entry = operation_entry(id, pending[id])
+    local size = #rex.json.encode(entry) + 1
+    if used + size > operations_bytes then
+      if #page > 0 then return page, page[#page].id end
+      entry = {id = id, kind = pending[id].kind, phase = pending[id].phase, compact = true}
+      size = #rex.json.encode(entry) + 1
+      if used + size > operations_bytes then fail('too_large', 'The pending operation ' .. id:sub(1, 64) .. '… is larger than one page') end
+    end
+    page[#page + 1] = entry
+    used = used + size
+  end
+  return page, nil
+end
 local function list_request(args)
   collect_scans()
   local key = args.repo or ''
@@ -508,7 +545,9 @@ local function list_request(args)
   -- A query starts a fresh scan. Retries read the scan already in progress.
   if not cached or (not cached.refreshing and not cached.awaiting_read) then cached = refresh(args.repo) end
   cached.awaiting_read = cached.refreshing
-  return {worktrees = cached.worktrees, root = root, refreshing = cached.refreshing, error = cached.error}
+  local result = {worktrees = cached.worktrees, root = root, refreshing = cached.refreshing, error = cached.error}
+  result.operations, result.operations_next = operations_page(args.operations_after)
+  return result
 end
 -- Keep a row selection in the route. Two windows must not share a last-selected path.
 local function route_with_path(base, path)
@@ -1039,7 +1078,7 @@ local function ui_action(args)
     if args.node_id == 'refresh' and args.action == 'refresh' then refresh_safe(); return {} end
     if args.action == 'discard' and type(args.node_id) == 'string' and args.node_id:sub(1, 8) == 'pending/' then
       if args.user ~= 'user' then fail('refused', 'Only the user can discard an operation') end
-      local result = discard_request(user_caller, args.node_id:sub(9), args.operation_key); refresh_safe(); return result
+      local result = discard_request(user_caller, {id = args.node_id:sub(9)}, args.operation_key); refresh_safe(); return result
     end
   elseif base == '/forms/worktree' and args.node_id == 'worktree_menu' and args.action == 'run' then
     if input.item_id == 'agent' then return {form = route_with_path('/forms/worktree-agent', path)} end
@@ -1078,8 +1117,8 @@ local actions = {
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>/<branch>, or return the matching existing tree. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', kind = 'client', title = 'List worktrees',
-    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory.',
-    args = {type = 'object', properties = {repo = {type = 'string'}}, additionalProperties = false}},
+    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. operations lists every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 32 KiB a page; an entry too large for a page has compact = true. When operations_next is present, call again with operations_after = operations_next for the next page. Paging changes nothing.',
+    args = {type = 'object', properties = {repo = {type = 'string'}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
     args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
@@ -1090,9 +1129,9 @@ local actions = {
       args = {type = 'object', additionalProperties = {type = 'string', maxLength = 16000}}, key = {type = 'string', minLength = 1, maxLength = 114}},
       required = {'path', 'key'}, additionalProperties = false}},
   {name = 'worktree.discard', kind = 'client', title = 'Discard a stopped worktree operation',
-    description = 'Discard your pending worktree operation (create or remove) that stopped, named by its key (operation). Refused while its Git process runs or its start is unknown. Result: status discarded, or status complete when the operation had already ended by itself (its own key returns its result). key is the key of this discard; retry with the same content after an unknown outcome.',
-    args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
-      required = {'operation', 'key'}, additionalProperties = false}},
+    description = 'Discard a pending worktree operation (create or remove) that stopped. Name it with exactly one of: id, the full operation ID of any pending operation (worktree.list operations); or operation, the key of your own operation. Refused while its Git process runs or its start is unknown. Result: status discarded, or status complete when the operation had already ended by itself (its own key returns its result). key is the key of this discard; retry with the same content after an unknown outcome.',
+    args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, id = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
+      required = {'key'}, additionalProperties = false}},
 }
 local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard'}
 for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
@@ -1162,7 +1201,7 @@ rex.on('client_perform_requested', function(ctx, ev)
       local key = text(args.key, 'key')
       return open_request(caller, args, {spawn = 'worktree-open/' .. key, ensure = 'agent-open/' .. part(caller.agent) .. part(key)}, nil, forwarded_pid)
     end
-    if ev.action == 'worktree.discard' then local result = discard_request(caller, args.operation, args.key); refresh_safe(); return result end
+    if ev.action == 'worktree.discard' then local result = discard_request(caller, {operation = args.operation, id = args.id}, args.key); refresh_safe(); return result end
     fail('not_supported', 'Unknown worktree action')
   end)
   rex.call('client.reply', {call_id = call_id, result = ok and result or nil,
