@@ -39,8 +39,8 @@ test('tool: open in a tab; the agent owns the worker; a replay returns the first
   expect(w.profile).to_be('shell')
   expect(open(alice, {path = tree.path, key = 'tab-1'}).spawn_id).to_be(first.spawn_id)
   expect(workers_in(tree.path)).to_be(1)
-  expect_error(function() bob:hub('hub.stop', {spawn_id = first.spawn_id}) end, 'did not start')
-  alice:hub('hub.stop', {spawn_id = first.spawn_id})
+  -- Any agent may stop any worker (LazyRex 9bc00c8): bob stops alice's worker (parent alice, above).
+  expect(bob:hub('hub.stop', {spawn_id = first.spawn_id}).status).to_be('closed')
   -- A replay after the worker closed returns the closed spawn; it starts nothing.
   local again = open(alice, {path = tree.path, key = 'tab-1'})
   expect(again.spawn_id).to_be(first.spawn_id)
@@ -198,8 +198,8 @@ test('tool: after an identity migration a replay finds the first spawn', functio
   expect(worker(first.spawn_id).parent).to_be('carol')
   -- A changed request with the legacy key still conflicts.
   expect_error(function() carol:call('worktree.open', {path = tree.path, key = 'mig', where = 'session'}) end, 'operation_conflict')
-  expect_error(function() agent('alice'):hub('hub.stop', {spawn_id = first.spawn_id}) end, 'did not start')
-  expect(carol:hub('hub.stop', {spawn_id = first.spawn_id}).status).to_be('closed')
+  -- Any agent may stop any worker (LazyRex 9bc00c8), also one whose parent is carol (above).
+  expect(agent('alice'):hub('hub.stop', {spawn_id = first.spawn_id}).status).to_be('closed')
 end)
 
 test('tool: a key that both IDs used is refused after the migration', function()
