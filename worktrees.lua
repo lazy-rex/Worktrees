@@ -409,30 +409,45 @@ local function discard(id)
 end
 -- worktree.discard and the panel's Discard button. target is an operation ID (the user: any
 -- pending operation) or an operation key of the caller (an agent: only its own operations).
--- The request key makes a replay return the first result; another target conflicts.
+-- The request key reserves its target before the target changes: a record
+-- discard/<part(actor)><part(key)> = {fingerprint, id}. A retry with the same key discards the
+-- reserved ID again (the target's saved discard result is the result), also after an alias change;
+-- another target with the same key conflicts, also after an interruption.
 local function discard_request(caller, target, key)
   text(target, 'operation')
   key = text(key, 'key')
   local fingerprint = 'discard-v1/' .. part(caller.user and 'id' or 'key') .. part(target)
-  for _, alias in ipairs(caller.aliases) do
-    local saved = hub('hub.store.op', {key = 'discard/' .. part(alias) .. part(key)})
-    if saved.found then return result_of(saved, fingerprint) end
-  end
-  local id = target
-  if not caller.user then
-    local state = catalog()
-    id = nil
-    for _, alias in ipairs(caller.aliases) do
-      local candidate = part(alias) .. part(target)
-      if not id and (state.pending[candidate] or hub('hub.store.op', {key = candidate}).found) then id = candidate end
+  local record_keys = {}
+  for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'discard/' .. part(alias) .. part(key) end
+  local function reserved()
+    local records = hub('hub.store.get', {keys = record_keys}).records
+    for _, record_key in ipairs(record_keys) do
+      local r = records[record_key]
+      if r and r.value ~= nil then
+        if r.value.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+        return r.value.id
+      end
     end
-    if not id then fail('not_found', 'You have no operation with this key') end
   end
-  local result = discard(id)
-  local saved = hub('hub.store.batch', {ops = {}, op = {key = 'discard/' .. part(caller.agent) .. part(key), fingerprint = fingerprint, result = result}})
-  if saved.op_exists then return result_of(saved.op_exists, fingerprint) end
-  if saved.conflict then fail('operation_conflict', 'This key has different content') end
-  return result
+  local id = reserved()
+  if not id then
+    id = target
+    if not caller.user then
+      local state = catalog()
+      id = nil
+      for _, alias in ipairs(caller.aliases) do
+        local candidate = part(alias) .. part(target)
+        if not id and (state.pending[candidate] or hub('hub.store.op', {key = candidate}).found) then id = candidate end
+      end
+      if not id then fail('not_found', 'You have no operation with this key') end
+    end
+    local saved = hub('hub.store.batch', {ops = {{key = record_keys[1], if_rev = '0', value = {fingerprint = fingerprint, id = id}}}})
+    if saved.conflict then
+      id = reserved()
+      if not id then fail('conflict', 'The discard request changed; retry with the same key') end
+    end
+  end
+  return discard(id)
 end
 local snapshots = {}
 local snapshot = {worktrees = {}, root = root}
