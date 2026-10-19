@@ -118,3 +118,39 @@ test('a retry after an identity change discards the reserved target', function()
   expect(r.discarded).to_be(true)
   expect(pending(id)).to_be(nil)
 end)
+
+-- awaiting_cleanup writes a create whose result committed, with its cleanup still pending.
+local function awaiting_cleanup(key)
+  local id = W.part('alice') .. W.part(key)
+  local path = W.root .. '/discard/' .. key
+  local fingerprint = 'create/' .. W.part(repo) .. W.part(key) .. W.part('')
+  local state = store('catalog').value or {repos = {}, pending = {}}
+  state.pending[id] = {kind = 'create', phase = 'cleanup', path = path, repo = repo, common = common,
+    actor = 'alice', fingerprint = fingerprint}
+  write({{key = 'catalog', value = state}})
+  put_operation({key = id, fingerprint = fingerprint, result = {path = path, repo = repo, branch = key, created = true}})
+  return id
+end
+
+test('a discard that finishes a cleanup replays its complete result', function()
+  local id = awaiting_cleanup('cleaned')
+  local first = alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup'})
+  expect(first.status).to_be('complete')
+  expect(pending(id)).to_be(nil)
+  expect(alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup'})).to_equal(first)
+  -- Another request for the same target never finished it: the target is not pending.
+  expect_error(function() alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup-other'}) end, 'not_found')
+end)
+
+test('an interrupted cleanup discard completes on retry and replays', function()
+  local id = awaiting_cleanup('cut-cleanup')
+  -- The reservation batch writes no catalog, so the first catalog batch is the cleanup.
+  with_injection({match = {writes = 'catalog'}, fail = 'lost cleanup'}, 1, function()
+    expect_error(function() alice:call('worktree.discard', {operation = 'cut-cleanup', key = 'cut-cleanup-request'}) end, 'lost cleanup')
+  end)
+  expect(pending(id).phase).to_be('cleanup')
+  local done = alice:call('worktree.discard', {operation = 'cut-cleanup', key = 'cut-cleanup-request'})
+  expect(done.status).to_be('complete')
+  expect(pending(id)).to_be(nil)
+  expect(alice:call('worktree.discard', {operation = 'cut-cleanup', key = 'cut-cleanup-request'})).to_equal(done)
+end)
