@@ -105,7 +105,9 @@ test('C: New Worktree… from the panel keeps the source repository; the submit 
   local shell = wait('one shell tab', function() local w = spawn_windows(S, 'feat-a'); return #w == 1 and w[1] end, 20)
   wait('the shell tab is active (placement.focus)', function() return sview(S).active_window_id == shell.window_id end, 20)
   local back = wait_view(src_window, '/panels/worktrees', 'the panel returns')
-  wait('the panel lists feat-a', function() return item(back:render(), 'worktrees', feat) ~= nil end, 20)
+  local row = wait('the panel lists feat-a', function() return item(back:render(), 'worktrees', feat) end, 20)
+  -- The label that panel-lab read on the screen (126).
+  expect(row.label).to_be('feat-a')
 end)
 
 test('D: Open in new tab makes the new tab active; Open in new session keeps the source focus; the panel returns', function()
@@ -197,7 +199,10 @@ test('G: after the shells close, Remove Worktree… (picker, then confirm) remov
   wait('the shell tabs close', function() return #spawn_windows(S, 'feat-a') == 0 end, 20)
   user:command('remove_worktree', {session = S, block = src})
   local picker = wait_view(src_window, '/forms/remove-worktree', 'the remove picker')
-  expect(item(picker:render(), 'remove_pick', feat) ~= nil).to_be(true)
+  local pick = item(picker:render(), 'remove_pick', feat)
+  expect(pick ~= nil).to_be(true)
+  -- The label that panel-lab read on the screen (204).
+  expect(pick.label).to_be('feat-a')
   picker:action('remove_pick', 'select', {item_id = feat})
   local confirm = wait_view(src_window, '/forms/remove-worktree?path=', 'the remove confirmation')
   confirm:seen('focus')
