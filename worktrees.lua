@@ -565,12 +565,14 @@ local function worktrees_page(trees_list, after)
   end
   table.sort(paths)
   local out, more = page(paths, function(path)
-    local t = by_path[path]
-    return {path = t.path, repo = t.repo, branch = t.branch, managed = t.managed, state = t.state, error = cut(t.error), workers = t.workers}
+    -- Every field of the scan row, so that no field of the reply disappears.
+    local e = {}
+    for k, v in pairs(by_path[path]) do e[k] = v end
+    e.error = cut(e.error)
+    return e
   end, {
     -- Too many workers: the count only (hub.workers lists them).
-    function(e) return {path = e.path, repo = e.repo, branch = e.branch, managed = e.managed, state = e.state, error = e.error,
-      workers_count = #(e.workers or {}), compact = true} end,
+    function(e) e.workers_count, e.workers, e.compact = #(e.workers or {}), nil, true; return e end,
     function(e) e.error = nil; return e end,
   }, worktrees_bytes, 'worktree')
   return out, more and out[#out].path or nil
