@@ -10,10 +10,17 @@ end
 local function part(value) return tostring(#value) .. ':' .. value end
 local function hub(action, args)
   local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
-  if type(response) ~= 'table' or type(response.result) ~= 'table' then
+  if type(response) ~= 'table' then
     if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Hub request failed') end
-    fail('unavailable', tostring(err or 'Invalid hub result'))
+    -- Observed on Rex 0.0.1792158932-g88fd41 (lab): a hub error arrives as text that ends with
+    -- "(status=<n> code=<code>)". Keep the hub's code: a refusal is final. Only an error with no
+    -- code, or a lost or timed-out call, is unavailable, so the hub retries it.
+    local message = tostring(err or 'Hub request failed')
+    local code = message:match('code=([%w_]+)%)$')
+    if not code or code == 'unavailable' or code == 'disconnected' or code == 'timeout' then fail('unavailable', message) end
+    fail(code, message:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or message)
   end
+  if type(response.result) ~= 'table' then fail('internal', 'Invalid hub result') end
   return response.result
 end
 local git_env = {GIT_DIR = false, GIT_WORK_TREE = false, GIT_COMMON_DIR = false,
