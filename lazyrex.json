@@ -1,0 +1,27 @@
+{
+ "name": "worktrees",
+ "main": "worktrees.lua",
+ "test": {
+  "agents": [
+   {
+    "id": "alice",
+    "name": "Alice"
+   },
+   {
+    "id": "bob",
+    "name": "Bob"
+   }
+  ],
+  "parity_fixture": "tests/parity_fixture.lua",
+  "parity_routes": [
+   "/forms/worktree",
+   "/forms/worktree-agent",
+   "/forms/worktree-agent/shell"
+  ],
+  "args": {
+   "worktrees": {
+    "worktrees_root": "${LAB}/worktrees"
+   }
+  }
+ }
+}

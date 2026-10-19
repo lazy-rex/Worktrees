@@ -680,17 +680,17 @@ local function render_panel(context)
   local items = {}
   for _, tree in ipairs(trees_for(source)) do
     items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree),
-      action = {name = 'select', label = 'Actions…', enabled = true}}
+      action = {name = 'select', label = 'Actions…', enabled = true, user_only = 'navigation'}}
   end
   local nodes = {
     {id = 'new', type = 'widget', text = source and ('Repository: ' .. source) or 'The source pane is not in a Git repository.',
-      action = {name = 'new', label = 'New Worktree…', enabled = true}},
+      action = {name = 'new', label = 'New Worktree…', enabled = true, user_only = 'navigation'}},
     {id = 'worktrees', type = 'list', label = 'Worktrees', items = items},
-    {id = 'refresh', type = 'widget', text = 'Managed root: ' .. root, action = {name = 'refresh', label = 'Refresh', enabled = true}},
+    {id = 'refresh', type = 'widget', text = 'Managed root: ' .. root, action = {name = 'refresh', label = 'Refresh', enabled = true, tool = 'worktree.list'}},
   }
   for id, op in pairs(catalog().pending) do
     nodes[#nodes + 1] = {id = 'pending/' .. id, type = 'widget', text = op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.',
-      action = {name = 'discard', label = 'Discard stopped operation', enabled = true}}
+      action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}}
   end
   if refresh_error then nodes[#nodes + 1] = {id = 'refresh_error', type = 'widget', text = refresh_error} end
   local status
@@ -704,10 +704,10 @@ local function render_tree_menu(path)
   return {title = tree.branch, nodes = {
     {id = 'about', type = 'widget', text = tree_detail(tree)},
     {id = 'worktree_menu', type = 'list', items = {
-      {id = 'open_tab', label = 'Open in new tab', action = {name = 'run', enabled = true}},
-      {id = 'open_session', label = 'Open in new session', action = {name = 'run', enabled = true}},
-      {id = 'agent', label = 'Start agent…', action = {name = 'run', enabled = true}},
-      {id = 'remove', label = 'Remove…', action = {name = 'run', enabled = removable(tree)}},
+      {id = 'open_tab', label = 'Open in new tab', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
+      {id = 'open_session', label = 'Open in new session', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
+      {id = 'agent', label = 'Start agent…', action = {name = 'run', enabled = true, user_only = 'navigation'}},
+      {id = 'remove', label = 'Remove…', action = {name = 'run', enabled = removable(tree), user_only = 'navigation'}},
     }},
     cancel_node(),
   }}
@@ -725,7 +725,7 @@ local function render_new(context)
     {id = 'new_worktree', type = 'form', fields = {repo_field,
       {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
       {id = 'base', label = 'Base (optional, for a new branch)', kind = 'text', value = ''}},
-      submit_action = {name = 'submit', label = 'Create worktree', enabled = true}},
+      submit_action = {name = 'submit', label = 'Create worktree', enabled = true, tool = 'worktree.create'}},
     {id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>/<branch>.'},
     cancel_node(),
   }}
@@ -736,7 +736,7 @@ local function render_remove(context, path)
   if not path then
     local items = {}
     for _, tree in ipairs(trees_for(repo_default(context))) do
-      if removable(tree) then items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree), action = {name = 'select', label = 'Choose', enabled = true}} end
+      if removable(tree) then items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree), action = {name = 'select', label = 'Choose', enabled = true, user_only = 'navigation'}} end
     end
     if #items == 0 then
       return {title = 'Remove worktree', nodes = {{id = 'none', type = 'widget', text = 'No managed worktree can be removed.'}, cancel_node()}}
@@ -749,7 +749,7 @@ local function render_remove(context, path)
     {id = 'about', type = 'widget', text = tree_detail(tree)},
     {id = 'remove_worktree', type = 'form', fields = {
       {id = 'path', label = 'Worktree', kind = 'select', required = true, value = path, options = {{value = path, label = tree.branch}}}},
-      submit_action = {name = 'submit', label = 'Remove worktree', enabled = true}}}
+      submit_action = {name = 'submit', label = 'Remove worktree', enabled = true, tool = 'worktree.remove'}}}
   local advice = remove_advice(path)
   if not advice then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Checking the worktree…'}
   elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. table.concat(advice.reasons or {}, '\n')} end
@@ -789,7 +789,7 @@ local function render_profiles(path)
   for _, profile in ipairs(hub('hub.profiles').profiles or {}) do
     items[#items + 1] = {id = profile.id, label = profile.name or profile.id,
       detail = (profile.kind or '') .. ((profile.running or 0) > 0 and (' · ' .. profile.running .. ' running') or ''),
-      action = {name = 'select', label = 'Choose', enabled = true}}
+      action = {name = 'select', label = 'Choose', enabled = true, user_only = 'navigation'}}
   end
   return {title = 'Start agent in ' .. tree.branch, nodes = {{id = 'profiles', type = 'list', label = 'Profiles', items = items}, cancel_node()}}
 end
@@ -802,7 +802,7 @@ local function render_agent(id, path)
     fields[#fields + 1] = {id = 'arg/' .. arg.name, label = arg.label or arg.name, kind = 'text', required = arg.required == true, value = arg.default or ''}
   end
   return {title = (profile.name or id) .. ' in ' .. tree.branch, nodes = {
-    {id = 'start_agent', type = 'form', fields = fields, submit_action = {name = 'submit', label = 'Start', enabled = true}},
+    {id = 'start_agent', type = 'form', fields = fields, submit_action = {name = 'submit', label = 'Start', enabled = true, tool = 'worktree.open'}},
     {id = 'help', type = 'widget', text = 'Directory: ' .. tree.path},
     cancel_node(),
   }}
@@ -923,9 +923,9 @@ actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward
 rex.call('client.keymap', {actions = actions})
 hub('hub.register', {plugin = 'worktrees', instance_id = instance_id, exports = exports, commands = {
   {id = 'worktrees', title = 'Worktrees…', description = 'List worktrees, with the source repository first', keywords = {'git', 'branch'},
-    surface = 'panel', landing = true, route = '/panels/worktrees'},
-  {id = 'new_worktree', title = 'New Worktree…', description = 'Create a worktree for a branch', keywords = {'git', 'branch'}, route = '/forms/new-worktree'},
-  {id = 'remove_worktree', title = 'Remove Worktree…', description = 'Remove a managed worktree', keywords = {'git', 'branch'}, route = '/forms/remove-worktree'}}})
+    surface = 'panel', landing = true, route = '/panels/worktrees', user_only = 'navigation'},
+  {id = 'new_worktree', title = 'New Worktree…', description = 'Create a worktree for a branch', keywords = {'git', 'branch'}, route = '/forms/new-worktree', action = 'worktree.create'},
+  {id = 'remove_worktree', title = 'Remove Worktree…', description = 'Remove a managed worktree', keywords = {'git', 'branch'}, route = '/forms/remove-worktree', action = 'worktree.remove'}}})
 -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel.
 hub('hub.ui.tabs', {tabs = {}})
 rex_ok('session.attach', {session_id = plugin_session, event_scope = 'session'})
