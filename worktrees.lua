@@ -505,37 +505,75 @@ local function refresh(repo_arg)
   if not repo_arg then snapshot = result; refresh_error = nil; pcall(invalidate) end
   return result
 end
--- operations_page lists the pending operations (the panel's pending entries), every repository,
--- sorted by ID, after the ID after (a position; it need not exist). A page holds at most 50
--- entries and 32 KiB of encoded JSON. The size is checked before an entry is added. next is the
--- last ID of the page when more entries follow. An entry that does not fit an empty page is
--- returned in a compact form with its exact ID; one whose compact form does not fit is an error.
-local operations_limit, operations_bytes = 50, 32768
-local function operation_entry(id, op)
-  -- A pending row from an older version can have no actor: the field is left out.
-  return {id = id, kind = op.kind, phase = op.phase, path = op.path, branch = op.branch, actor = op.actor}
+-- The reply of worktree.list fits every client: one Rex control message is 64 KiB, and the
+-- harness test client takes at most 48 KiB. Budgets, as encoded JSON: worktrees 16 KiB and
+-- operations 24 KiB a page, the other fields 4 KiB, all of it 44 KiB.
+local page_limit, worktrees_bytes, operations_bytes, meta_bytes, reply_bytes = 50, 16384, 24576, 4096, 45056
+local function encoded(value) return #rex.json.encode(value) end
+-- cut keeps text within 1024 bytes, the ellipsis included, at a UTF-8 character boundary.
+local function cut(value)
+  if type(value) ~= 'string' or #value <= 1024 then return value end
+  local n = 1024 - #'…'
+  while n > 0 and value:byte(n + 1) >= 0x80 and value:byte(n + 1) < 0xC0 do n = n - 1 end
+  return value:sub(1, n) .. '…'
 end
+-- page adds entries in order while the page holds fewer than 50 and the size stays within budget.
+-- The size is checked before an entry is added. An entry that does not fit an empty page is
+-- replaced by its compact forms in order; if none fits, the reply is too_large. It returns the
+-- page and whether more entries follow. A page is never empty before the end.
+local function page(keys, build, compacts, budget, what)
+  local out, used = {}, 2
+  for _, key in ipairs(keys) do
+    if #out == page_limit then return out, true end
+    local entry = build(key)
+    local size = encoded(entry) + 1
+    if used + size > budget then
+      if #out > 0 then return out, true end
+      for _, compact in ipairs(compacts) do
+        entry = compact(entry)
+        size = encoded(entry) + 1
+        if used + size <= budget then break end
+      end
+      if used + size > budget then fail('too_large', 'The ' .. what .. ' ' .. key:sub(1, 64) .. '… is larger than one page') end
+    end
+    out[#out + 1] = entry
+    used = used + size
+  end
+  return out, false
+end
+-- operations: the pending operations (the panel's pending entries), every repository, sorted by
+-- ID, after the ID after (a position; it need not exist).
 local function operations_page(after)
   if after ~= nil then text(after, 'operations_after') end
   local pending = catalog().pending
   local ids = {}
   for id in pairs(pending) do if after == nil or id > after then ids[#ids + 1] = id end end
   table.sort(ids)
-  local page, used = {}, 2
-  for _, id in ipairs(ids) do
-    if #page == operations_limit then return page, page[#page].id end
-    local entry = operation_entry(id, pending[id])
-    local size = #rex.json.encode(entry) + 1
-    if used + size > operations_bytes then
-      if #page > 0 then return page, page[#page].id end
-      entry = {id = id, kind = pending[id].kind, phase = pending[id].phase, compact = true}
-      size = #rex.json.encode(entry) + 1
-      if used + size > operations_bytes then fail('too_large', 'The pending operation ' .. id:sub(1, 64) .. '… is larger than one page') end
-    end
-    page[#page + 1] = entry
-    used = used + size
+  local out, more = page(ids, function(id)
+    local op = pending[id]
+    -- A pending row from an older version can have no actor: the field is left out.
+    return {id = id, kind = op.kind, phase = op.phase, path = op.path, branch = op.branch, actor = op.actor}
+  end, {function(e) return {id = e.id, kind = e.kind, phase = e.phase, compact = true} end}, operations_bytes, 'pending operation')
+  return out, more and out[#out].id or nil
+end
+-- worktrees: the trees of the latest scan, sorted by path, after the path after (a position).
+local function worktrees_page(trees_list, after)
+  if after ~= nil then text(after, 'worktrees_after') end
+  local by_path, paths = {}, {}
+  for _, tree in ipairs(trees_list or {}) do
+    if after == nil or tree.path > after then by_path[tree.path] = tree; paths[#paths + 1] = tree.path end
   end
-  return page, nil
+  table.sort(paths)
+  local out, more = page(paths, function(path)
+    local t = by_path[path]
+    return {path = t.path, repo = t.repo, branch = t.branch, managed = t.managed, state = t.state, error = cut(t.error), workers = t.workers}
+  end, {
+    -- Too many workers: the count only (hub.workers lists them).
+    function(e) return {path = e.path, repo = e.repo, branch = e.branch, managed = e.managed, state = e.state, error = e.error,
+      workers_count = #(e.workers or {}), compact = true} end,
+    function(e) e.error = nil; return e end,
+  }, worktrees_bytes, 'worktree')
+  return out, more and out[#out].path or nil
 end
 local function list_request(args)
   collect_scans()
@@ -545,10 +583,15 @@ local function list_request(args)
   -- A query starts a fresh scan. Retries read the scan already in progress.
   if not cached or (not cached.refreshing and not cached.awaiting_read) then cached = refresh(args.repo) end
   cached.awaiting_read = cached.refreshing
-  local result = {worktrees = cached.worktrees, root = root, refreshing = cached.refreshing, error = cached.error}
-  -- No pending operation: operations is left out (Rex Lua encodes an empty table as an object).
-  local page, next_id = operations_page(args.operations_after)
-  if page[1] then result.operations, result.operations_next = page, next_id end
+  local result = {root = root, refreshing = cached.refreshing, error = cut(cached.error)}
+  local trees_out, trees_next = worktrees_page(cached.worktrees, args.worktrees_after)
+  local ops_out, ops_next = operations_page(args.operations_after)
+  -- An empty list is left out (Rex Lua encodes an empty table as an object).
+  result.worktrees_next, result.operations_next = trees_next, ops_next
+  if encoded(result) > meta_bytes then fail('too_large', 'The reply fields without the lists are larger than 4 KiB') end
+  if trees_out[1] then result.worktrees = trees_out end
+  if ops_out[1] then result.operations = ops_out end
+  if encoded(result) > reply_bytes then fail('too_large', 'The worktree.list reply is larger than 44 KiB') end
   return result
 end
 -- Keep a row selection in the route. Two windows must not share a last-selected path.
@@ -1119,8 +1162,8 @@ local actions = {
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>/<branch>, or return the matching existing tree. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', kind = 'client', title = 'List worktrees',
-    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. operations lists every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 32 KiB a page; an entry too large for a page has compact = true. operations is absent when no pending operation follows. When operations_next is present, call again with operations_after = operations_next for the next page. Paging changes nothing.',
-    args = {type = 'object', properties = {repo = {type = 'string'}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
+    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. Paging changes nothing. error text is at most 1024 bytes.',
+    args = {type = 'object', properties = {repo = {type = 'string'}, worktrees_after = {type = 'string', minLength = 1}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
     args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
