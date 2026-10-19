@@ -212,3 +212,39 @@ test('a pending agent spawn becomes open when its agent joins, on both paths', f
   expect(found ~= nil and found.state ~= 'starting', 'an open user joiner worker').to_be(true)
   W.run({'rm', gate})
 end)
+
+test('view: a shell that an older version started (no open intent) replays its spawn after the upgrade', function()
+  -- An older version called hub.spawn with key worktree-open/created/<operation key> and saved no
+  -- open intent. The state: the first call spawns, its reply is lost, and the hub retries; a gate
+  -- holds the retries while the test deletes the intent, as an older version left it.
+  local spawn_key = 'worktree-open/created/old-ui'
+  local lost = fault({point = 'action', action = 'hub.spawn', when = 'after', mode = 'lose-reply', key = spawn_key})
+  local gate = fault({point = 'action', action = 'hub.spawn', when = 'before', mode = 'gate', key = spawn_key, nth = 2})
+  user:command('new_worktree')
+  local form = user:view('/forms/new-worktree')
+  form:render()
+  local _, key = form:admit('action', {node_id = 'new_worktree', action = 'submit',
+    input = {values = {repo = repo, branch = 'faults/old-ui', base = ''}}, revision = form.revision, operation_key = 'old-ui'})
+  wait('the retries reach the gate', function() return fault_fired(lost) and fault_fired(gate) end, 30)
+  local path = W.root .. '/faults/faults/old-ui'
+  expect(workers_in(path)).to_be(1)
+  local first
+  for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == path then first = w.spawn_id end end
+  local record = 'open/' .. W.part('user') .. W.part(spawn_key)
+  expect(store(record).value ~= nil, 'the new version saved an intent').to_be(true)
+  write({{key = record, delete = true}})
+  -- A retry without an intent goes through the new handler: it saves a new intent, then calls
+  -- hub.spawn with the same key (refused by the gate until the release).
+  wait('the new handler saves an intent again', function()
+    local v = store(record).value
+    return v and v.phase == 'ready'
+  end, 30)
+  fault_release(gate)
+  local op = form:settle(key, 30)
+  expect(op.status).to_be('succeeded')
+  expect(workers_in(path)).to_be(1)
+  local now
+  for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == path then now = w.spawn_id end end
+  expect(now).to_be(first)
+  expect(W.intent('user', spawn_key).phase).to_be('ready')
+end)
