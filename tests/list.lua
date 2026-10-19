@@ -159,11 +159,14 @@ test('a tree with too many workers is compact: workers_count, and hub.workers li
       error(seen, 0)
     end
     entry = seen[tree.path]
-    return entry and entry.compact
+    -- The finished scan: dirty is known only after git status.
+    return entry and entry.compact and entry.state ~= 'checking'
   end, 60)
   expect(entry.workers_count).to_be(16)
   expect(entry.workers).to_be(nil)
   expect(entry.branch).to_be('busy')
+  expect(entry.dirty, 'a compact entry keeps dirty').to_be(false)
+  expect(entry.state).to_be('clean')
   local listed = 0
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == dir then listed = listed + 1 end end
   expect(listed).to_be(16)

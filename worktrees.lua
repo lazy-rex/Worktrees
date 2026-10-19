@@ -582,8 +582,10 @@ local function list_request(args)
   local key = args.repo or ''
   requested_repo = args.repo
   local cached = snapshots[key]
-  -- A query starts a fresh scan. Retries read the scan already in progress.
-  if not cached or (not cached.refreshing and not cached.awaiting_read) then cached = refresh(args.repo) end
+  -- A first page starts a fresh scan. Retries read the scan already in progress. A call with a
+  -- cursor reads the same scan as its first page, so the pages come from one scan.
+  local paging = args.worktrees_after ~= nil or args.operations_after ~= nil
+  if not cached or (not paging and not cached.refreshing and not cached.awaiting_read) then cached = refresh(args.repo) end
   cached.awaiting_read = cached.refreshing
   local result = {root = root, refreshing = cached.refreshing, error = cut(cached.error)}
   local trees_out, trees_next = worktrees_page(cached.worktrees, args.worktrees_after)
@@ -1164,7 +1166,7 @@ local actions = {
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>/<branch>, or return the matching existing tree. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', kind = 'client', title = 'List worktrees',
-    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. Paging changes nothing. error text is at most 1024 bytes.',
+    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the scan of its first page and starts no scan. Paging changes nothing. error text is at most 1024 bytes.',
     args = {type = 'object', properties = {repo = {type = 'string'}, worktrees_after = {type = 'string', minLength = 1}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
