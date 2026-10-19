@@ -546,7 +546,9 @@ local function list_request(args)
   if not cached or (not cached.refreshing and not cached.awaiting_read) then cached = refresh(args.repo) end
   cached.awaiting_read = cached.refreshing
   local result = {worktrees = cached.worktrees, root = root, refreshing = cached.refreshing, error = cached.error}
-  result.operations, result.operations_next = operations_page(args.operations_after)
+  -- No pending operation: operations is left out (Rex Lua encodes an empty table as an object).
+  local page, next_id = operations_page(args.operations_after)
+  if page[1] then result.operations, result.operations_next = page, next_id end
   return result
 end
 -- Keep a row selection in the route. Two windows must not share a last-selected path.
@@ -1117,7 +1119,7 @@ local actions = {
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>/<branch>, or return the matching existing tree. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', kind = 'client', title = 'List worktrees',
-    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. operations lists every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 32 KiB a page; an entry too large for a page has compact = true. When operations_next is present, call again with operations_after = operations_next for the next page. Paging changes nothing.',
+    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. operations lists every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 32 KiB a page; an entry too large for a page has compact = true. operations is absent when no pending operation follows. When operations_next is present, call again with operations_after = operations_next for the next page. Paging changes nothing.',
     args = {type = 'object', properties = {repo = {type = 'string'}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
