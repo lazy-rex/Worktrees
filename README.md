@@ -14,13 +14,12 @@ The plugin loads its other files from its own directory, so keep them together.
 
 ## Tests
 
-The tests use `../LazyRex` (the client library in `lib/` and the lab harness in `lab/`).
-Start an isolated lab server first, and never point tests at your own Rex server:
+The tests are Lua files in `tests/`. The LazyRex hub runs them:
 
 ```sh
-../LazyRex/lab/server.sh /tmp/rexlab
-REX_SERVER=unix:///tmp/rexlab/rex.sock node tests/<name>.mjs
+lazyrex-hub test                 # every tests/*.lua
+lazyrex-hub test -file list.lua  # one file
 ```
 
-- worktrees.mjs, worktrees-hub.mjs (mock hub)
-- worktrees-panel-lab.mjs, worktrees-contract-lab.sh (lab)
+`lazyrex-hub test` starts its own isolated lab Rex server for each file. Never point tests at your own Rex server.
+It uses `../LazyRex` (set `-lazyrex` for another checkout). See LazyRex `docs/testing.md` for the test API.
