@@ -120,7 +120,8 @@ test('a retry after an identity change discards the reserved target', function()
 end)
 
 -- awaiting_cleanup writes a create whose result committed, with its cleanup still pending.
-local function awaiting_cleanup(key)
+-- discarded = true: the saved result is a discard (the discard's result committed, its cleanup did not).
+local function awaiting_cleanup(key, discarded)
   local id = W.part('alice') .. W.part(key)
   local path = W.root .. '/discard/' .. key
   local fingerprint = 'create/' .. W.part(repo) .. W.part(key) .. W.part('')
@@ -128,8 +129,9 @@ local function awaiting_cleanup(key)
   state.pending[id] = {kind = 'create', phase = 'cleanup', path = path, repo = repo, common = common,
     actor = 'alice', fingerprint = fingerprint}
   write({{key = 'catalog', value = state}})
-  put_operation({key = id, fingerprint = fingerprint, result = {path = path, repo = repo, branch = key, created = true}})
-  return id
+  local result = discarded and {status = 'discarded', discarded = true, path = path} or {path = path, repo = repo, branch = key, created = true}
+  put_operation({key = id, fingerprint = fingerprint, result = result})
+  return id, result
 end
 
 test('a discard that finishes a cleanup replays its complete result', function()
@@ -138,8 +140,8 @@ test('a discard that finishes a cleanup replays its complete result', function()
   expect(first.status).to_be('complete')
   expect(pending(id)).to_be(nil)
   expect(alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup'})).to_equal(first)
-  -- Another request for the same target never finished it: the target is not pending.
-  expect_error(function() alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup-other'}) end, 'not_found')
+  -- The result comes from the target: another request for the same target gets the same answer.
+  expect(alice:call('worktree.discard', {operation = 'cleaned', key = 'cleanup-other'})).to_equal(first)
 end)
 
 test('an interrupted cleanup discard completes on retry and replays', function()
@@ -154,3 +156,24 @@ test('an interrupted cleanup discard completes on retry and replays', function()
   expect(pending(id)).to_be(nil)
   expect(alice:call('worktree.discard', {operation = 'cut-cleanup', key = 'cut-cleanup-request'})).to_equal(done)
 end)
+
+test('another caller can finish the cleanup first: a create replay, then the discard retry', function()
+  local id = awaiting_cleanup('other-cleanup')
+  with_injection({match = {writes = 'catalog'}, fail = 'lost cleanup'}, 1, function()
+    expect_error(function() alice:call('worktree.discard', {operation = 'other-cleanup', key = 'other-request'}) end, 'lost cleanup')
+  end)
+  -- The create replay returns its saved result and finishes the cleanup (startup does the same).
+  expect(alice:call('worktree.create', {repo = repo, branch = 'other-cleanup', key = 'other-cleanup'}).created).to_be(true)
+  expect(pending(id)).to_be(nil)
+  expect(alice:call('worktree.discard', {operation = 'other-cleanup', key = 'other-request'}).status).to_be('complete')
+end)
+
+test('a discard whose result committed but whose cleanup did not finishes the cleanup on replay', function()
+  local id, result = awaiting_cleanup('discarded-cleanup', true)
+  write({{key = 'discard/' .. W.part('alice') .. W.part('done-request'),
+    value = {fingerprint = 'discard-v1/' .. W.part('key') .. W.part('discarded-cleanup'), id = id}}})
+  expect(alice:call('worktree.discard', {operation = 'discarded-cleanup', key = 'done-request'})).to_equal(result)
+  expect(pending(id)).to_be(nil)
+  expect(alice:call('worktree.create', {repo = repo, branch = 'discarded-cleanup', key = 'discarded-cleanup'}).status).to_be('discarded')
+end)
+

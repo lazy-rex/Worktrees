@@ -113,10 +113,8 @@ local function is_alias(caller, id)
   for _, alias in ipairs(caller.aliases) do if alias == id then return true end end
   return false
 end
--- extra: more store ops that commit in the same batch (a discard request's outcome).
-local function save(state, rev, op, extra)
+local function save(state, rev, op)
   local args = {ops = {{key = 'catalog', if_rev = rev, value = state}}}
-  for _, x in ipairs(extra or {}) do args.ops[#args.ops + 1] = x end
   if op then args.op = op end
   local result = hub('hub.store.batch', args)
   if result.conflict then fail('conflict', 'The worktree catalog changed; retry with the same key') end
@@ -136,10 +134,10 @@ local function operation_blocks(op)
   if op.session ~= plugin_session then rex_ok('session.attach', {session_id = op.session, event_scope = 'session'}) end
   return rex_ok('session.list_blocks', {session_id = op.session}).blocks or {}, false
 end
-local function cleanup_done(id, extra)
+local function cleanup_done(id)
   local state, rev = catalog()
   local op = state.pending[id]
-  if not op or op.phase ~= 'cleanup' then return false end
+  if not op or op.phase ~= 'cleanup' then return end
   if op.block then
     local blocks = operation_blocks(op)
     for _, block in ipairs(blocks) do
@@ -150,8 +148,7 @@ local function cleanup_done(id, extra)
   end
   if op.kind == 'remove' then hub('hub.cwd.unlock', {path = op.path, key = id}) end
   state.pending[id] = nil
-  save(state, rev, nil, extra)
-  return true
+  save(state, rev)
 end
 -- Rex owns each Git mutation. Keep the block until the operation result commits.
 local function mutation(id, op, args)
@@ -206,7 +203,7 @@ local function result_of(saved, fingerprint)
   if saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
   return saved.result
 end
-local function finish(id, op, result, extra)
+local function finish(id, op, result)
   local state, rev = catalog()
   op.phase = 'cleanup'
   state.pending[id] = op
@@ -217,7 +214,7 @@ local function finish(id, op, result, extra)
   elseif op.kind == 'remove' and result.removed == true then
     state.owners[op.path] = nil
   end
-  save(state, rev, {key = id, fingerprint = op.fingerprint, result = result}, extra)
+  save(state, rev, {key = id, fingerprint = op.fingerprint, result = result})
   cleanup_done(id)
   if result.error then fail(result.error.code, result.error.message) end
   return result
@@ -395,20 +392,22 @@ local function mutate(caller, kind, args)
   if kind == 'create' then return create(caller, id, fingerprint, args, pending) end
   return remove(caller, id, fingerprint, args, pending)
 end
--- outcome(result): store ops that commit with the change to the target (discard_request saves
--- its result there, so a replay returns it).
-local function discard(id, outcome)
+-- discard ends a pending operation. Its result comes only from the target's own durable state, so
+-- every caller and every retry gets the same answer, whoever finished the cleanup (a discard, a
+-- create or remove replay, or startup):
+-- - pending in phase cleanup: finish the cleanup first (close the block, unlock), then as below;
+-- - a saved result that is a discard: that result;
+-- - a saved result of any other kind: {status = 'complete'} (the operation ended by itself);
+-- - no pending entry and no saved result: not_found.
+local function discard(id)
   local state = catalog()
   local op = state.pending[id]
+  if op and op.phase == 'cleanup' then cleanup_done(id); op = nil end
   if not op then
     local saved = hub('hub.store.op', {key = id})
-    if saved.found and saved.result.discarded then return saved.result end
-    fail('not_found', 'This operation is no longer pending')
-  end
-  if op.phase == 'cleanup' then
-    local result = {status = 'complete'}
-    cleanup_done(id, outcome and outcome(result))
-    return result
+    if not saved.found then fail('not_found', 'This operation is no longer pending') end
+    if type(saved.result) == 'table' and saved.result.discarded then return saved.result end
+    return {status = 'complete'}
   end
   if op.phase == 'sending' then
     local blocks, gone = operation_blocks(op)
@@ -421,36 +420,31 @@ local function discard(id, outcome)
     end
   end
   if checks[id] then checks[id]:kill(); checks[id] = nil end
-  local result = {status = 'discarded', discarded = true, path = op.path}
-  return finish(id, op, result, outcome and outcome(result))
+  return finish(id, op, {status = 'discarded', discarded = true, path = op.path})
 end
 -- worktree.discard and the panel's Discard button. target is an operation ID (the user: any
 -- pending operation) or an operation key of the caller (an agent: only its own operations).
 -- The request key reserves its target before the target changes: a record
 -- discard/<part(actor)><part(key)> = {fingerprint, id}. A retry with the same key discards the
 -- reserved ID again, also after an alias change; another target with the same key conflicts, also
--- after an interruption. The result commits into that record in the same batch as the change to
--- the target, so a replay returns it (also the 'complete' of a finished cleanup).
+-- after an interruption. discard() derives the result from the target, so the record holds no result.
 local function discard_request(caller, target, key)
   text(target, 'operation')
   key = text(key, 'key')
   local fingerprint = 'discard-v1/' .. part(caller.user and 'id' or 'key') .. part(target)
   local record_keys = {}
   for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'discard/' .. part(alias) .. part(key) end
-  local reserved_key, done
   local function reserved()
     local records = hub('hub.store.get', {keys = record_keys}).records
     for _, record_key in ipairs(record_keys) do
       local r = records[record_key]
       if r and r.value ~= nil then
         if r.value.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
-        reserved_key, done = record_key, r.value.result
         return r.value.id
       end
     end
   end
   local id = reserved()
-  if done then return done end
   if not id then
     id = target
     if not caller.user then
@@ -462,17 +456,13 @@ local function discard_request(caller, target, key)
       end
       if not id then fail('not_found', 'You have no operation with this key') end
     end
-    reserved_key = record_keys[1]
-    local saved = hub('hub.store.batch', {ops = {{key = reserved_key, if_rev = '0', value = {fingerprint = fingerprint, id = id}}}})
+    local saved = hub('hub.store.batch', {ops = {{key = record_keys[1], if_rev = '0', value = {fingerprint = fingerprint, id = id}}}})
     if saved.conflict then
       id = reserved()
       if not id then fail('conflict', 'The discard request changed; retry with the same key') end
-      if done then return done end
     end
   end
-  return discard(id, function(result)
-    return {{key = reserved_key, value = {fingerprint = fingerprint, id = id, result = result}}}
-  end)
+  return discard(id)
 end
 local snapshots = {}
 local snapshot = {worktrees = {}, root = root}
