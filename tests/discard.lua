@@ -273,7 +273,8 @@ local function all_pages(who, args)
   return seen, order, pages
 end
 local function clear_pending()
-  local state = store('catalog').value
+  -- A file filter can run this before any test has made the catalog.
+  local state = store('catalog').value or {repos = {}}
   state.pending = {}
   write({{key = 'catalog', value = state}})
 end
