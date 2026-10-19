@@ -1,6 +1,7 @@
--- A burst of notifications (hub.changed workers, view.seen focus, terminal events) does no Git
--- work in the plugin's request queue: each one sets a flag, and one later tick refreshes. So a
--- burst cannot fill the queue (16 requests), and a tool call answers at once.
+-- A notification (hub.changed workers, view.seen focus, a terminal event) does no Git work in the
+-- plugin's request queue: each one sets a flag, and one later tick refreshes. This makes each
+-- notification short; it does not make the queue (16 requests) unlimited. Observed in the lab:
+-- after a burst of 30 spawns, and after 30 stops, the first worktree.list call answered.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local repo = W.repo('burst')
 local alice = agent('alice')

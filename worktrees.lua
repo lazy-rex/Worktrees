@@ -706,7 +706,8 @@ local function refresh_safe()
   end
 end
 -- A notification (hub.changed workers, view.seen focus, a terminal event) does no Git work in the
--- request queue: a burst of them must not fill it. Each one sets pending_refresh, and one
+-- request queue, so each one is short. In the lab, a burst of 30 spawns or 30 stops did not fill
+-- the queue (16 requests); a larger burst is not tested. Each one sets pending_refresh, and one
 -- rex.after(0.2) tick refreshes. 0.2 s is a scheduling delay: the tick waits for queued work.
 -- 'always' refreshes. 'workers' refreshes only when the worker set changed. 'always' wins
 -- until the tick consumes it. The tick consumes the flag before its work, so a notification
