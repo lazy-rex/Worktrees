@@ -1109,7 +1109,7 @@ local actions = {
       args = {type = 'object', additionalProperties = {type = 'string', maxLength = 16000}}, key = {type = 'string', minLength = 1, maxLength = 114}},
       required = {'path', 'key'}, additionalProperties = false}},
   {name = 'worktree.discard', kind = 'client', title = 'Discard a stopped worktree operation',
-    description = 'Discard your pending worktree operation (create or remove) that stopped, named by its key (operation). Refused while its Git process runs or its start is unknown. key is the key of this discard; retry with the same content after an unknown outcome.',
+    description = 'Discard your pending worktree operation (create or remove) that stopped, named by its key (operation). Refused while its Git process runs or its start is unknown. Result: status discarded, or status complete when the operation had already ended by itself (its own key returns its result). key is the key of this discard; retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
       required = {'operation', 'key'}, additionalProperties = false}},
 }
