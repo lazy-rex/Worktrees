@@ -64,8 +64,9 @@ local function workers_error(text)
   local s = load_sandbox(tests_dir .. '/..', base)
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
   s.hub_errors['hub.workers'] = text
-  local reply = s:perform('hub.changed', {what = 'workers'})
-  assert_true(reply and reply.error, 'hub.changed fails')
+  -- worktree.list scans at once, so the hub.workers error reaches the reply.
+  local reply = s:perform('worktree.list', {}, s.agent)
+  assert_true(reply and reply.error, 'worktree.list fails')
   return reply.error
 end
 

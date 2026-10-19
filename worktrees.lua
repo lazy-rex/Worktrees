@@ -705,6 +705,35 @@ local function refresh_safe()
     end
   end
 end
+-- A notification (hub.changed workers, view.seen focus, a terminal event) does no Git work in the
+-- request queue: a burst of them must not fill it. Each one sets pending_refresh, and one
+-- rex.after(0.2) tick refreshes. 0.2 s is a scheduling delay: the tick waits for queued work.
+-- 'always' refreshes. 'workers' refreshes only when the worker set changed. 'always' wins
+-- until the tick consumes it. The tick consumes the flag before its work, so a notification
+-- during the work arms a new tick; an error goes to refresh_error, and the next notification
+-- or list call tries again.
+local pending_refresh, refresh_armed
+local function notified_refresh()
+  local kind = pending_refresh
+  pending_refresh, refresh_armed = nil, false
+  local ok, err = pcall(function()
+    if kind == 'workers' then
+      local current = workers_key(hub('hub.workers').workers or {})
+      if current == worker_key then return end
+      -- Remember the change even when a previous scan is still running. Otherwise a worker
+      -- that starts and stops during that scan can leave stale removal advice.
+      worker_key = current
+    end
+    refresh_safe()
+  end)
+  if not ok then refresh_error = type(err) == 'table' and err.message or tostring(err); pcall(invalidate) end
+end
+local function notify(kind)
+  if kind == 'always' or not pending_refresh then pending_refresh = kind end
+  if refresh_armed then return end
+  rex.after(0.2, notified_refresh)
+  refresh_armed = true
+end
 local function submit_worktree(args)
   local route = route_path(args.route)
   local kind, node
@@ -794,17 +823,17 @@ rex.on('terminal.pwd_changed', function(ctx, ev)
   local was_managed = pane_directories[ctx.block_id]
   local is_managed = managed(path)
   pane_directories[ctx.block_id] = path and is_managed
-  if was_managed or is_managed then refresh_safe() end
+  if was_managed or is_managed then notify('always') end
 end)
 -- A pane can predate this plugin, so its last directory event can be unavailable.
 rex.on('terminal.child_exited', function(ctx, ev)
-  if pane_directories[ctx.block_id] ~= false then refresh_safe() end
+  if pane_directories[ctx.block_id] ~= false then notify('always') end
 end)
 rex.on('block_closed', function(ctx, ev)
   local block = ev.block_id or ctx.block_id
   local was_managed = pane_directories[block]
   pane_directories[block] = nil
-  if was_managed then refresh_safe() end
+  if was_managed then notify('always') end
 end)
 
 -- The Worktrees panel and forms (the maintainer, 2026-10-17: no tab; palette commands and a side panel).
@@ -1226,16 +1255,8 @@ rex.on('client_perform_requested', function(ctx, ev)
     if ev.action:sub(1, 5) == 'view.' or ev.action == 'hub.changed' then
       if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub calls view actions') end
       if ev.action == 'view.render' then return ui_render(args) end
-      if ev.action == 'hub.changed' and args.what == 'workers' then
-        local current = workers_key(hub('hub.workers').workers or {})
-        if current ~= worker_key then
-          -- Remember the event even when a previous scan is still running. Otherwise a
-          -- worker that starts and stops during that scan can leave stale removal advice.
-          worker_key = current
-          refresh_safe()
-        end
-      end
-      if ev.action == 'view.seen' and args.reason == 'focus' then refresh_safe() end
+      if ev.action == 'hub.changed' and args.what == 'workers' then notify('workers') end
+      if ev.action == 'view.seen' and args.reason == 'focus' then notify('always') end
       if ev.action == 'view.action' then return ui_action(args) end
       return {}
     end

@@ -34,19 +34,24 @@ end
 local function row(rows, path) for _, t in ipairs(rows) do if t.path == path then return t end end end
 -- advice opens the remove confirmation for path and returns its check text when the check ends:
 -- '' when removal can go ahead. The plugin asks hub.cwd.check (workers, panes and locks).
-local function advice(path)
+-- advice waits until the check ends and shows want ('' is clear; nil is any result).
+local function advice(path, want)
   user:command('remove_worktree')
   user:view('/forms/remove-worktree'):render()
   local op = user:view('/forms/remove-worktree'):action('remove_pick', 'select', {item_id = path})
   expect(op.status).to_be('succeeded')
   local form = user:view(W.route('/forms/remove-worktree', path))
   -- Focus refreshes the advice, as the renderer reports it; the advice is cached until a refresh.
+  -- The refresh comes in the plugin's next tick (about 0.2 s), so a render before it can show
+  -- the earlier advice.
   form:seen('focus')
   local text
   wait('the removal check ends', function()
     local check = node(form:render(), 'check')
     text = check and check.text or ''
-    return not text:find('Checking')
+    if text:find('Checking') then return false end
+    if want == '' then return text == '' end
+    return want == nil or text:find(want, 1, true) ~= nil
   end, 20)
   return text
 end
@@ -96,7 +101,7 @@ test('a worker in the tree blocks removal and shows in the list; no lock stays',
   local l = list({repo = repo}, function(rows) local t = row(rows, first.path); return t and #t.workers > 0 end)
   expect(row(l.worktrees, first.path).workers[1].spawn_id).to_be(w.spawn_id)
   expect_error(function() remove('busy', first.path) end, 'worker or terminal pane uses')
-  expect(advice(first.path):find('Worker: ' .. w.spawn_id, 1, true) ~= nil).to_be(true)
+  expect(advice(first.path, 'Worker: ' .. w.spawn_id):find('Worker: ' .. w.spawn_id, 1, true) ~= nil).to_be(true)
   alice:hub('hub.stop', {spawn_id = w.spawn_id})
   wait('the worker is gone', function() return not locked(first.path) end, 20)
 end)
@@ -120,7 +125,7 @@ test('changes or ignored files refuse removal and keep the files', function()
   expect_error(function() remove('ignored', first.path) end, 'changes or ignored')
   W.run({'rm', first.path .. '/ignored.tmp'})
   -- The refusals hold no lock: the check is clear again.
-  expect(advice(first.path)).to_be('')
+  expect(advice(first.path, '')).to_be('')
 end)
 
 test('a clean tree is removed, the key replays, and the branch stays', function()
