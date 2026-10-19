@@ -29,11 +29,11 @@ test('a slow Git process does not block tools or rendering; the retry creates on
   local args = {key = 'slow-create', repo = repo, branch = 'recovery/slow'}
   expect(alice:call('worktree.create', args).status).to_be('running')
   wait('Git runs in its block', function() local op = pending('slow-create'); return op and op.block end)
-  local start = os.time()
+  local start = W.now()
   expect(alice:call('worktree.create', args).status).to_be('running')
   user:command('worktrees')
   user:view('/panels/worktrees'):render()
-  expect(os.time() - start <= 2, 'a tool call and a render answer while Git runs').to_be(true)
+  expect(W.now() - start < 2, 'a tool call and a render answer within 2 s while Git runs').to_be(true)
   W.write(gate, 'go')
   local slow = settle(function() return alice:call('worktree.create', args) end)
   expect(slow.created).to_be(true)

@@ -14,6 +14,9 @@ end
 function W.try(argv, cwd) return rex.exec(argv, {cwd = cwd, timeout = 30}) end
 
 function W.real(path) return W.run({'realpath', path}) end
+-- now returns the wall clock in seconds with millisecond resolution. Rex Lua has only os.time
+-- (whole seconds). The process start adds to a measured interval, so a bound stays strict.
+function W.now() return tonumber(W.run({'perl', '-MTime::HiRes=time', '-e', 'printf("%.3f", time)'})) end
 
 -- git runs Git with a fixed identity; the lab HOME has no Git config.
 function W.git(dir, ...)

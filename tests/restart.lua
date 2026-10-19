@@ -52,12 +52,12 @@ test('a crash after Git starts, before its block ID is saved: the retry finds th
   end
   expect(labeled).to_be(1)
   hub:restart({crash = true})
-  local start = os.time()
+  local start = W.now()
   expect(alice:call('worktree.create', args).status).to_be('running')
   expect(pending('slow-create').block ~= nil, 'the retry saved the block ID').to_be(true)
   user:command('worktrees')
   expect(user:view('/panels/worktrees'):render().title).to_be('Worktrees')
-  expect(os.time() - start <= 2, 'a tool call and a render answer while Git runs').to_be(true)
+  expect(W.now() - start < 2, 'a tool call and a render answer within 2 s while Git runs').to_be(true)
   W.write(gate, 'go')
   local slow = settle(function() return alice:call('worktree.create', args) end)
   expect(slow.created).to_be(true)
@@ -131,9 +131,11 @@ test('saved results replay after a restart: create, open and remove', function()
   hub:restart({crash = true})
   expect(alice:call('worktree.remove', {key = 'durable-remove', path = first.path})).to_equal(removed)
   expect(W.try({'test', '-e', first.path}).ok).to_be(false)
-  -- The panel renders the repository after the restarts. It opens from a new window: the test
-  -- renderer of the first test's panel does not attach again after a hub restart, and the hub
-  -- does not replace a side panel whose renderer is not attached.
+  -- The panel renders the repository after the restarts. Workaround: it opens from a new window.
+  -- testview attaches once and does not attach again after a hub restart (a harness gap, fix on
+  -- LazyRex branch testview-reattach); the real renderer attaches again. The hub refuses, by
+  -- design, to replace a side panel whose renderer is not attached. When the fix is on main, this
+  -- test replaces the first test's panel instead.
   local S = H.args.tests_session
   local before = {}
   for _, w in ipairs(rex.call('session.view', {session_id = S}).windows or {}) do before[w.window_id] = true end
