@@ -10,6 +10,14 @@
    {
     "id": "bob",
     "name": "Bob"
+   },
+   {
+    "id": "carol",
+    "name": "Carol"
+   },
+   {
+    "id": "dave",
+    "name": "Dave"
    }
   ],
   "parity_fixture": "tests/parity_fixture.lua",

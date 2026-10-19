@@ -42,15 +42,20 @@ function W.repo(name)
   return W.real(dir)
 end
 
--- settle repeats a call while it returns {status = 'running'} (a same-key retry).
-function W.settle(fn, what)
-  local result
-  wait(what or 'the operation finishes', function()
-    result = fn()
-    return result.status ~= 'running'
-  end)
-  return result
+-- settle repeats a call while it returns {status = 'running'} (a same-key retry). An error stops it.
+function W.settle(fn, what, timeout)
+  local deadline = os.time() + (timeout or 20)
+  while true do
+    local result = fn()
+    if result.status ~= 'running' then return result end
+    if os.time() >= deadline then error('timed out waiting for ' .. (what or 'the operation'), 2) end
+    rex.sleep(0.1)
+  end
 end
+
+-- part and intent name records as the plugin does: part(s) = #s .. ':' .. s.
+function W.part(s) return tostring(#s) .. ':' .. s end
+function W.intent(actor, spawn_key) return store('open/' .. W.part(actor) .. W.part(spawn_key)).value end
 
 -- route encodes a selected path as the plugin does (route_with_path).
 function W.route(base, path)

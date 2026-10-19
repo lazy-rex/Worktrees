@@ -24,3 +24,12 @@ menu = opens(user:view('/panels/worktrees'), 'worktrees', 'select', {item_id = t
 local agent_route = W.route('/forms/worktree-agent', tree.path)
 local profiles = opens(menu, 'worktree_menu', 'run', {item_id = 'agent'}, agent_route)
 opens(profiles, 'profiles', 'select', {item_id = 'shell'}, W.route('/forms/worktree-agent/shell', tree.path))
+
+-- A stopped operation shows the Discard widget on the panel.
+local state = store('catalog').value
+state.pending[W.part('alice') .. W.part('parity-stopped')] = {kind = 'create', fingerprint = 'synthetic', repo = repo,
+  common = W.real(repo .. '/.git'), path = W.root .. '/parity/stopped', branch = 'stopped', phase = 'prepared', actor = 'alice'}
+write({{key = 'catalog', value = state}})
+user:command('worktrees')
+local tree_with_pending = user:view('/panels/worktrees'):render()
+if not node(tree_with_pending, 'pending/' .. W.part('alice') .. W.part('parity-stopped')) then error('the panel shows no Discard widget', 0) end

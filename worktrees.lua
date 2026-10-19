@@ -86,7 +86,25 @@ end
 local function catalog()
   local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
   if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing worktree catalog') end
-  return r.value or {repos = {}, pending = {}}, r.rev
+  local state = r.value or {repos = {}, pending = {}}
+  -- owners[path] = {agent, identity}: the agent that created the tree, and the tree's identity.
+  -- A catalog from an older version has no owners, so its trees are user-only.
+  state.owners = state.owners or {}
+  return state, r.rev
+end
+-- A caller is the user (the view path) or an agent (hub.identify). aliases are the agent ID and its
+-- legacy IDs after an identity migration, current first. An operation ID is part(actor)..part(key).
+local user_caller = {agent = 'user', aliases = {'user'}, user = true}
+local function agent_caller(who)
+  local aliases, seen = {who.agent}, {[who.agent] = true}
+  for _, id in ipairs(type(who.legacy) == 'table' and who.legacy or {}) do
+    if type(id) == 'string' and id ~= '' and not seen[id] then aliases[#aliases + 1] = id; seen[id] = true end
+  end
+  return {agent = who.agent, aliases = aliases, session = who.session_id}
+end
+local function is_alias(caller, id)
+  for _, alias in ipairs(caller.aliases) do if alias == id then return true end end
+  return false
 end
 local function save(state, rev, op)
   local args = {ops = {{key = 'catalog', if_rev = rev, value = state}}}
@@ -182,6 +200,13 @@ local function finish(id, op, result)
   local state, rev = catalog()
   op.phase = 'cleanup'
   state.pending[id] = op
+  -- Ownership commits with the result. An operation from an older version has no actor and
+  -- grants no ownership. A removal clears the owner of that path.
+  if op.kind == 'create' and result.created == true and op.actor then
+    state.owners[op.path] = {agent = op.actor, identity = identity(op.path)}
+  elseif op.kind == 'remove' and result.removed == true then
+    state.owners[op.path] = nil
+  end
   save(state, rev, {key = id, fingerprint = op.fingerprint, result = result})
   cleanup_done(id)
   if result.error then fail(result.error.code, result.error.message) end
@@ -236,7 +261,7 @@ local function check_status(id, path, ignored)
   if not result then fail('unavailable', tostring(err)) end
   return result
 end
-local function create(id, fingerprint, args, pending)
+local function create(caller, id, fingerprint, args, pending)
   local op = pending
   if not op then
     local info = repo_info(args.repo)
@@ -251,7 +276,7 @@ local function create(id, fingerprint, args, pending)
     local base = branch_exists and ('refs/heads/' .. branch) or (args.base or 'HEAD')
     -- HEAD belongs to the selected worktree, not to the common Git directory's main tree.
     local commit = line(checked({'git', '-C', info.top, 'rev-parse', '--verify', '--end-of-options', base .. '^{commit}'}))
-    op = {kind = 'create', fingerprint = fingerprint, repo = info.repo, common = info.common,
+    op = {kind = 'create', fingerprint = fingerprint, repo = info.repo, common = info.common, actor = caller.agent,
       path = path, branch = branch, commit = commit, created = not exists(path), phase = 'prepared'}
     if not op.created then same_tree(op) end
     admit(id, op)
@@ -280,7 +305,7 @@ local function create(id, fingerprint, args, pending)
   end
   return finish(id, op, {path = op.path, repo = op.repo, branch = op.branch, created = op.created})
 end
-local function remove(id, fingerprint, args, pending)
+local function remove(caller, id, fingerprint, args, pending)
   local op = pending
   if not op then
     local input = text(args.path, 'path')
@@ -290,8 +315,16 @@ local function remove(id, fingerprint, args, pending)
     local info = repo_info(path)
     local tree = find_tree(info.common, path)
     if info.top ~= path or not tree or tree.bare or path == info.repo then fail('refused', 'Select a linked worktree, not the main repository') end
-    op = {kind = 'remove', fingerprint = fingerprint, repo = info.repo, common = info.common,
+    op = {kind = 'remove', fingerprint = fingerprint, repo = info.repo, common = info.common, actor = caller.agent,
       path = path, branch = tree.branch or '', identity = identity(path), phase = 'prepared'}
+    -- The user removes any managed tree. An agent removes only a tree that it created, and only
+    -- while the tree at that path is the same tree (hub.stop has the same rule for workers).
+    if not caller.user then
+      local owner = catalog().owners[path]
+      if type(owner) ~= 'table' or not is_alias(caller, owner.agent) or owner.identity ~= op.identity then
+        fail('refused', 'An agent can remove only a worktree that it created. Ask the user to remove this one.')
+      end
+    end
     admit(id, op)
   end
   if op.phase == 'sending' then
@@ -329,20 +362,28 @@ local function remove(id, fingerprint, args, pending)
   end
   return finish(id, op, {path = op.path, repo = op.repo, branch = op.branch, removed = true})
 end
-local function mutate(actor, kind, args)
+-- An operation key belongs to its caller. After an identity migration, a key of a legacy ID
+-- still finds its saved result or its pending operation; a new key uses the current ID.
+local function mutate(caller, kind, args)
   local key = text(args.key, 'key')
   local fingerprint
   if kind == 'create' then
     fingerprint = 'create/' .. part(text(args.repo, 'repo')) .. part(text(args.branch, 'branch')) .. part(args.base == nil and '' or text(args.base, 'base'))
   else fingerprint = 'remove/' .. part(text(args.path, 'path')) end
-  local id = part(actor) .. part(key)
-  local saved = hub('hub.store.op', {key = id})
-  if saved.found then cleanup_done(id); return result_of(saved, fingerprint) end
+  for _, alias in ipairs(caller.aliases) do
+    local id = part(alias) .. part(key)
+    local saved = hub('hub.store.op', {key = id})
+    if saved.found then cleanup_done(id); return result_of(saved, fingerprint) end
+  end
   local state = catalog()
-  local pending = state.pending[id]
+  local id, pending = part(caller.agent) .. part(key), nil
+  for _, alias in ipairs(caller.aliases) do
+    local found = state.pending[part(alias) .. part(key)]
+    if found then id, pending = part(alias) .. part(key), found; break end
+  end
   if pending and pending.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
-  if kind == 'create' then return create(id, fingerprint, args, pending) end
-  return remove(id, fingerprint, args, pending)
+  if kind == 'create' then return create(caller, id, fingerprint, args, pending) end
+  return remove(caller, id, fingerprint, args, pending)
 end
 local function discard(id)
   local state = catalog()
@@ -365,6 +406,33 @@ local function discard(id)
   end
   if checks[id] then checks[id]:kill(); checks[id] = nil end
   return finish(id, op, {status = 'discarded', discarded = true, path = op.path})
+end
+-- worktree.discard and the panel's Discard button. target is an operation ID (the user: any
+-- pending operation) or an operation key of the caller (an agent: only its own operations).
+-- The request key makes a replay return the first result; another target conflicts.
+local function discard_request(caller, target, key)
+  text(target, 'operation')
+  key = text(key, 'key')
+  local fingerprint = 'discard-v1/' .. part(caller.user and 'id' or 'key') .. part(target)
+  for _, alias in ipairs(caller.aliases) do
+    local saved = hub('hub.store.op', {key = 'discard/' .. part(alias) .. part(key)})
+    if saved.found then return result_of(saved, fingerprint) end
+  end
+  local id = target
+  if not caller.user then
+    local state = catalog()
+    id = nil
+    for _, alias in ipairs(caller.aliases) do
+      local candidate = part(alias) .. part(target)
+      if not id and (state.pending[candidate] or hub('hub.store.op', {key = candidate}).found) then id = candidate end
+    end
+    if not id then fail('not_found', 'You have no operation with this key') end
+  end
+  local result = discard(id)
+  local saved = hub('hub.store.batch', {ops = {}, op = {key = 'discard/' .. part(caller.agent) .. part(key), fingerprint = fingerprint, result = result}})
+  if saved.op_exists then return result_of(saved.op_exists, fingerprint) end
+  if saved.conflict then fail('operation_conflict', 'This key has different content') end
+  return result
 end
 local snapshots = {}
 local snapshot = {worktrees = {}, root = root}
@@ -554,7 +622,7 @@ local function submit_worktree(args)
     request.branch = values.branch
     if values.base ~= '' then request.base = values.base end
   else request.path = values.path end
-  local result = mutate(args.user, kind, request)
+  local result = mutate(user_caller, kind, request)
   if result.status == 'running' then return result end
   refresh_safe()
   return {close_form = true, path = result.path, created = result.created, removed = result.removed}
@@ -757,21 +825,6 @@ local function render_remove(context, path)
   nodes[#nodes + 1] = cancel_node()
   return {title = 'Remove ' .. tree.branch, nodes = nodes}
 end
-local function spawn_key(prefix, key)
-  local value = prefix .. key
-  -- hub.spawn keys are at most 128 bytes. A shorter alias could join two operations, so refuse.
-  if #value > 128 then fail('invalid_input', 'The operation key is too long') end
-  return value
-end
--- spawn_effect maps a hub.spawn result to the view result: pending keeps the operation running
--- (view_ops retries with the same key), failed is a definite failure, open and closed are done.
-local function spawn_effect(spawn)
-  if spawn.status == 'pending' then return {status = 'running'} end
-  if spawn.status == 'failed' then fail('open_failed', 'The terminal did not start: ' .. tostring(spawn.error or 'unknown error')) end
-  if spawn.status == 'open' or spawn.status == 'closed' then return {close_form = true} end
-  -- An unknown status is not proof of an open: keep the key for a retry.
-  fail('unavailable', 'hub.spawn gave an unknown status: ' .. tostring(spawn.status))
-end
 -- Only these errors are definite. Every other error (unavailable, timeout, an unknown outcome)
 -- goes back to view_ops unchanged, so it retries the same key.
 local definite = {invalid_input = true, refused = true, not_found = true, open_failed = true}
@@ -807,24 +860,6 @@ local function render_agent(id, path)
     cancel_node(),
   }}
 end
-local function start_agent(args, id, path)
-  local key = text(args.operation_key, 'operation_key')
-  local tree = path and find_known(path)
-  if not tree or tree.state == 'missing' then fail('invalid_input', 'The worktree is not available') end
-  local profile = profile_of(id)
-  local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
-  local named = {}
-  for _, arg in ipairs(profile.args or {}) do
-    local value = values['arg/' .. arg.name]
-    if type(value) == 'string' and value ~= '' then named[arg.name] = value end
-  end
-  local session = args.context.session_id
-  local focus = {source_window_id = args.context.window_id}
-  if values.placement == 'session' then session = hub('hub.session.ensure', {key = 'agent/' .. key, name = tree.branch}).session_id; focus = nil end
-  local spawn = {profile = id, key = spawn_key('worktree-agent/', key), cwd = tree.path, ['for'] = 'user', placement = {session = session, focus = focus}}
-  if next(named) then spawn.args = named end
-  return spawn_effect(hub('hub.spawn', spawn))
-end
 local function ui_render(args)
   local base, path = route_path(args.route or '')
   local context = args.context
@@ -840,21 +875,147 @@ local function ui_render(args)
   return {tree = tree}
 end
 
--- Open a tree: the built-in shell profile (hub.spawn) in a new tab, in the source session or in a
--- new session. The spawn key makes a retried action reuse the first spawn.
-local function open_shell(context, path, where, key)
-  local tree = find_known(path)
-  if not tree or tree.state == 'missing' or tree.state == 'bare' then fail('invalid_input', 'The worktree is not available') end
-  local placement = {session = context.session_id}
-  if where == 'session' then
-    -- A spawn into another session cannot select that session in the app, so it asks for no focus.
-    placement.session = hub('hub.session.ensure', {key = 'open/' .. key, name = tree.branch}).session_id
-  else
-    -- The user lands in the new tab, only while the source tab is still active (hub.spawn focus).
-    placement.focus = {source_window_id = context.window_id}
+-- worktree.open, the menu's Open items, the Start agent form and the shell after New Worktree all
+-- use open_request. req = {path, where, profile, title, args}. keys = {spawn, ensure}: the hub keys
+-- (the user keeps the keys of older versions; hub.spawn keys are per caller). view = the user's
+-- palette context ({session_id, window_id}); nil for an agent, which gets on_behalf instead.
+-- branch_title: without a title, the tab gets the branch name (the menu's Open items). The
+-- fingerprint keeps the title as given, so a replay does not depend on the current tree.
+-- Order: validate; replay a saved intent; check the tree and the profile; save the intent; ensure
+-- the session; save the request; spawn. A retry sends the saved request again, so a moved caller,
+-- a removed tree or a changed profile cannot change it.
+local function runes(value)
+  local n = 0
+  for i = 1, #value do local b = value:byte(i); if b < 128 or b >= 192 then n = n + 1 end end
+  return n
+end
+local function open_fingerprint(req)
+  local names = {}
+  for name in pairs(req.args) do names[#names + 1] = name end
+  table.sort(names)
+  local value = 'open-v1/' .. part(req.path) .. part(req.where) .. part(req.profile) .. part(req.title or '') .. part(tostring(#names))
+  for _, name in ipairs(names) do value = value .. part(name) .. part(req.args[name]) end
+  return value
+end
+local function open_request(caller, req, keys, view, requester_pid, branch_title)
+  local path = text(req.path, 'path')
+  if path:sub(1, 1) ~= '/' then fail('invalid_input', 'path must be absolute') end
+  local where = req.where == nil and 'tab' or req.where
+  if where ~= 'tab' and where ~= 'session' then fail('invalid_input', "where must be 'tab' or 'session'") end
+  local profile_id = text(req.profile == nil and 'shell' or req.profile, 'profile')
+  if req.title ~= nil and (type(req.title) ~= 'string' or runes(req.title) > 60) then fail('invalid_input', 'title must be text of at most 60 characters') end
+  local named = {}
+  if req.args ~= nil then
+    if type(req.args) ~= 'table' then fail('invalid_input', 'args must be an object of strings') end
+    for name, value in pairs(req.args) do
+      if type(name) ~= 'string' or type(value) ~= 'string' or #value > 16000 then fail('invalid_input', 'args must be an object of strings of at most 16000 bytes') end
+      named[name] = value
+    end
   end
-  return hub('hub.spawn', {profile = 'shell', key = spawn_key('worktree-open/', key), title = tree.branch, cwd = tree.path,
-    ['for'] = 'user', placement = placement})
+  -- hub.spawn keys are at most 128 bytes, hub.session.ensure keys 1024. A shorter alias could join
+  -- two operations, so refuse.
+  if #keys.spawn > 128 or #keys.ensure > 1024 then fail('invalid_input', 'The operation key is too long') end
+  req = {path = path, where = where, profile = profile_id, title = req.title, args = named}
+  local fingerprint = open_fingerprint(req)
+  -- One record per caller and spawn key. After an identity migration, the record of a legacy ID
+  -- is the same operation: the hub moves that ID's spawns to the identity, so hub.spawn replays
+  -- the first spawn (and refuses a key that both IDs used).
+  local record_keys = {}
+  for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'open/' .. part(alias) .. part(keys.spawn) end
+  local own_key, intent, rev
+  local function load()
+    local records = hub('hub.store.get', {keys = record_keys}).records
+    own_key, intent, rev = record_keys[1], nil, '0'
+    for _, key in ipairs(record_keys) do
+      local r = records[key]
+      if r and r.value ~= nil then
+        if r.value.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+        own_key, intent, rev = key, r.value, r.rev
+        return
+      end
+    end
+  end
+  local function put(value)
+    local result = hub('hub.store.batch', {ops = {{key = own_key, if_rev = rev, value = value}}})
+    if result.conflict then load(); return false end
+    rev = result.revs and result.revs[own_key] or rev
+    intent = value
+    return true
+  end
+  load()
+  if not intent then
+    local tree = find_known(path)
+    if not tree or tree.state == 'missing' or tree.state == 'bare' then fail('invalid_input', 'The worktree is not available') end
+    local profile = profile_of(profile_id)
+    local declared = {}
+    for _, arg in ipairs(profile.args or {}) do
+      declared[arg.name] = true
+      if arg.required == true and (named[arg.name] == nil or named[arg.name] == '') and (arg.default == nil or arg.default == '') then
+        fail('invalid_input', 'The profile needs the argument ' .. arg.name)
+      end
+    end
+    for name in pairs(named) do if not declared[name] then fail('invalid_input', 'The profile has no argument ' .. name) end end
+    local request = {profile = profile_id, key = keys.spawn, cwd = tree.path, title = req.title}
+    if request.title == nil and branch_title then
+      -- hub.spawn titles are at most 60 characters. Cut a long branch name at a character boundary.
+      local title, n = tree.branch, 0
+      for i = 1, #title do
+        local b = title:byte(i)
+        if b < 128 or b >= 192 then n = n + 1 end
+        if n > 60 then title = title:sub(1, i - 1); break end
+      end
+      request.title = title
+    end
+    if next(named) then request.args = named end
+    if where == 'tab' then
+      if view then
+        -- The user lands in the new tab, only while the source tab is still active (hub.spawn focus).
+        request.placement = {session = view.session_id, focus = {source_window_id = view.window_id}}
+      elseif caller.session then request.placement = {session = caller.session} end
+    end
+    local value = {fingerprint = fingerprint, actor = caller.agent, phase = where == 'session' and 'prepared' or 'ready',
+      request = request, ensure = where == 'session' and {key = keys.ensure, name = tree.branch} or nil}
+    if not put(value) and not intent then fail('conflict', 'The open intent changed; retry with the same key') end
+  end
+  if intent.phase == 'prepared' then
+    -- A spawn into another session cannot select that session in the app, so it asks for no focus.
+    local session = hub('hub.session.ensure', {key = intent.ensure.key, name = intent.ensure.name}).session_id
+    local value = {fingerprint = intent.fingerprint, actor = intent.actor, phase = 'ready', request = intent.request, ensure = intent.ensure}
+    value.request.placement = {session = session}
+    if not put(value) then fail('conflict', 'The open intent changed; retry with the same key') end
+  end
+  local spawn = {}
+  for name, value in pairs(intent.request) do spawn[name] = value end
+  if caller.user then spawn['for'] = 'user' else spawn.on_behalf = requester_pid end
+  local result = hub('hub.spawn', spawn)
+  if result.status == 'failed' then fail('open_failed', 'The terminal did not start: ' .. tostring(result.error or 'unknown error')) end
+  if result.status ~= 'pending' and result.status ~= 'open' and result.status ~= 'closed' then
+    -- An unknown status is not proof of an open: keep the key for a retry.
+    fail('unavailable', 'hub.spawn gave an unknown status: ' .. tostring(result.status))
+  end
+  return {status = result.status == 'pending' and 'running' or result.status, spawn_id = result.spawn_id,
+    session_id = result.session_id, agent_id = result.agent_id, path = intent.request.cwd}
+end
+-- The view result of an open: running keeps the view operation running (the hub retries the same
+-- key); open and closed close the form.
+local function open_effect(result)
+  if result.status == 'running' then return {status = 'running'} end
+  return {close_form = true}
+end
+local function start_agent(args, id, path)
+  local key = text(args.operation_key, 'operation_key')
+  local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
+  local named = {}
+  for name, value in pairs(values) do
+    if type(name) == 'string' and name:sub(1, 4) == 'arg/' and type(value) == 'string' and value ~= '' then named[name:sub(5)] = value end
+  end
+  local where = values.placement == 'session' and 'session' or 'tab'
+  return open_effect(open_request(user_caller, {path = path, where = where, profile = id, args = named},
+    {spawn = 'worktree-agent/' .. key, ensure = 'agent/' .. key}, args.context))
+end
+local function open_menu(args, path, where, key)
+  return open_request(user_caller, {path = path, where = where, profile = 'shell'},
+    {spawn = 'worktree-open/' .. key, ensure = 'open/' .. key}, args.context, nil, true)
 end
 local function ui_action(args)
   local base, path = route_path(args.route or '')
@@ -867,13 +1028,13 @@ local function ui_action(args)
     if args.node_id == 'refresh' and args.action == 'refresh' then refresh_safe(); return {} end
     if args.action == 'discard' and type(args.node_id) == 'string' and args.node_id:sub(1, 8) == 'pending/' then
       if args.user ~= 'user' then fail('refused', 'Only the user can discard an operation') end
-      local result = discard(args.node_id:sub(9)); refresh_safe(); return result
+      local result = discard_request(user_caller, args.node_id:sub(9), args.operation_key); refresh_safe(); return result
     end
   elseif base == '/forms/worktree' and args.node_id == 'worktree_menu' and args.action == 'run' then
     if input.item_id == 'agent' then return {form = route_with_path('/forms/worktree-agent', path)} end
     if input.item_id == 'remove' then return {form = route_with_path('/forms/remove-worktree', path)} end
     if input.item_id == 'open_tab' or input.item_id == 'open_session' then
-      return spawn_effect(open_shell(args.context, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
+      return open_effect(open_menu(args, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
     end
   elseif base == '/forms/new-worktree' and args.node_id == 'new_worktree' and args.action == 'submit' then
     -- the maintainer (2026-10-17): after New Worktree, open a shell there in a new tab. A retry replays the
@@ -881,7 +1042,7 @@ local function ui_action(args)
     local result = submit_worktree(args)
     if result.status == 'running' or result.created == nil then return result end
     local ok, effect = pcall(function()
-      return spawn_effect(open_shell(args.context, result.path, 'tab', 'created/' .. text(args.operation_key, 'operation_key')))
+      return open_effect(open_menu(args, result.path, 'tab', 'created/' .. text(args.operation_key, 'operation_key')))
     end)
     if not ok then
       if type(effect) ~= 'table' or not definite[effect.code] then error(effect) end
@@ -909,10 +1070,20 @@ local actions = {
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory.',
     args = {type = 'object', properties = {repo = {type = 'string'}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
-    description = 'Remove a managed linked worktree. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
+    description = 'Remove a managed linked worktree that you created (the user can remove any). Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
     args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
+  {name = 'worktree.open', kind = 'client', title = 'Open a worktree',
+    description = 'Start a profile (default shell; hub.profiles lists them, for example an agent) with the worktree as its directory, in a new tab of your session (where=tab) or in a new session (where=session). After worktree.create, open a shell with this action, as the New Worktree form does. You own the worker (hub.stop). Choose a key; after an unknown outcome or a running result, retry with the same key and content.',
+    args = {type = 'object', properties = {path = {type = 'string', minLength = 1}, where = {type = 'string', enum = {'tab', 'session'}},
+      profile = {type = 'string', minLength = 1}, title = {type = 'string', maxLength = 60},
+      args = {type = 'object', additionalProperties = {type = 'string', maxLength = 16000}}, key = {type = 'string', minLength = 1, maxLength = 114}},
+      required = {'path', 'key'}, additionalProperties = false}},
+  {name = 'worktree.discard', kind = 'client', title = 'Discard a stopped worktree operation',
+    description = 'Discard your pending worktree operation (create or remove) that stopped, named by its key (operation). Refused while its Git process runs or its start is unknown. key is the key of this discard; retry with the same content after an unknown outcome.',
+    args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
+      required = {'operation', 'key'}, additionalProperties = false}},
 }
-local exports = {'worktree.create', 'worktree.list', 'worktree.remove'}
+local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard'}
 for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
   actions[#actions + 1] = {name = name, kind = 'client', title = name, args = {type = 'object', additionalProperties = true}}
 end
@@ -936,6 +1107,8 @@ refresh_safe()
 rex.on('client_perform_requested', function(ctx, ev)
   local call_id = ev.call_id
   local ok, result = pcall(function()
+    -- on_behalf (hub.spawn): the hub accepts the requester PID only while this forward is in flight.
+    local forwarded_pid
     if ev.action == 'hub.forward' then
       if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub forwards agent actions') end
       local forwarded = ev.args or {}
@@ -945,6 +1118,7 @@ rex.on('client_perform_requested', function(ctx, ev)
       if type(forwarded.requester_pid) ~= 'number' or forwarded.requester_pid <= 0 or forwarded.requester_pid % 1 ~= 0 then
         fail('invalid_input', 'A positive requester PID is required')
       end
+      forwarded_pid = forwarded.requester_pid
       ev = {action = forwarded.action, args = forwarded.args,
         requester = {principal = {kind = 'peer', pid = forwarded.requester_pid}}}
     end
@@ -969,9 +1143,15 @@ rex.on('client_perform_requested', function(ctx, ev)
     if not principal or principal.kind ~= 'peer' or type(principal.pid) ~= 'number' then fail('refused', 'A local requester PID is required') end
     local who = hub('hub.identify', {pid = principal.pid})
     if not who.found then fail('refused', 'The hub does not recognize this agent') end
-    if ev.action == 'worktree.create' then local result = mutate(who.agent, 'create', args); if result.status ~= 'running' then refresh_safe() end; return result end
-    if ev.action == 'worktree.remove' then local result = mutate(who.agent, 'remove', args); if result.status ~= 'running' then refresh_safe() end; return result end
+    local caller = agent_caller(who)
+    if ev.action == 'worktree.create' then local result = mutate(caller, 'create', args); if result.status ~= 'running' then refresh_safe() end; return result end
+    if ev.action == 'worktree.remove' then local result = mutate(caller, 'remove', args); if result.status ~= 'running' then refresh_safe() end; return result end
     if ev.action == 'worktree.list' then return list_request(args) end
+    if ev.action == 'worktree.open' then
+      local key = text(args.key, 'key')
+      return open_request(caller, args, {spawn = 'worktree-open/' .. key, ensure = 'agent-open/' .. part(caller.agent) .. part(key)}, nil, forwarded_pid)
+    end
+    if ev.action == 'worktree.discard' then local result = discard_request(caller, args.operation, args.key); refresh_safe(); return result end
     fail('not_supported', 'Unknown worktree action')
   end)
   rex.call('client.reply', {call_id = call_id, result = ok and result or nil,

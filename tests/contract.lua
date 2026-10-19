@@ -2,7 +2,7 @@
 -- commit). The exports reach the agent face; only the hub may forward a call or call view.*; a
 -- caller outside every pane is refused; the plugin declares no tab.
 
-local exports = {'worktree.create', 'worktree.list', 'worktree.remove'}
+local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard'}
 
 local function client(label)
   local r = rex.call('target.resolve', {kinds = {'client'}, queries = {label}})
@@ -32,6 +32,8 @@ test('the export schemas require a key for every change', function()
   for _, a in ipairs(plugin.actions) do required[a.name] = a.args and a.args.required or {} end
   expect(required['worktree.create']).to_equal({'repo', 'branch', 'key'})
   expect(required['worktree.remove']).to_equal({'path', 'key'})
+  expect(required['worktree.open']).to_equal({'path', 'key'})
+  expect(required['worktree.discard']).to_equal({'operation', 'key'})
 end)
 
 test('only the hub may call hub.forward or view.*', function()
