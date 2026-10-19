@@ -1,0 +1,160 @@
+-- Hub faults at the real boundaries (LazyRex lab faults, docs/testing.md "Faults"): a lost
+-- hub.spawn reply, a pending and a failed spawn, transport errors, a held unlock and failed
+-- invalidations. Ported from worktrees.mjs 194-206, 252-262 and 364-371; coverage map in the
+-- commit. The hub restart rows stay open: the harness has no hub restart.
+local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
+local repo = W.repo('faults')
+local alice = agent('alice')
+
+write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
+
+local function create(branch, key)
+  return W.settle(function() return alice:call('worktree.create', {repo = repo, branch = branch, key = key}) end)
+end
+local function workers_in(path)
+  local n = 0
+  for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == path and w.state ~= 'closed' then n = n + 1 end end
+  return n
+end
+local function menu(path)
+  user:command('worktrees')
+  local panel = user:view('/panels/worktrees')
+  panel:render()
+  expect(panel:action('worktrees', 'select', {item_id = path}).status).to_be('succeeded')
+  local m = user:view(W.route('/forms/worktree', path))
+  m:render()
+  return m
+end
+local function id(key) return W.part('alice') .. W.part(key) end
+
+local tree = create('faults/one', 'one')
+
+test('tool: a lost hub.spawn reply is unavailable; the retry returns the same spawn', function()
+  local f = fault({point = 'action', action = 'hub.spawn', when = 'after', mode = 'lose-reply', key = 'worktree-open/lost'})
+  local before = workers_in(tree.path)
+  local e = expect_error(function() alice:call('worktree.open', {path = tree.path, key = 'lost'}) end)
+  expect(e.code).to_be('unavailable')
+  expect(fault_fired(f)).to_be(true)
+  -- The spawn ran before the reply was lost.
+  expect(workers_in(tree.path)).to_be(before + 1)
+  local again = W.settle(function() return alice:call('worktree.open', {path = tree.path, key = 'lost'}) end)
+  expect(workers_in(tree.path)).to_be(before + 1)
+  expect(again.status).to_be('open')
+end)
+
+test('view: New Worktree with a lost hub.spawn reply; the hub retries the operation; one tree, one shell', function()
+  local f = fault({point = 'action', action = 'hub.spawn', when = 'after', mode = 'lose-reply', key = 'worktree-open/created/view-lost'})
+  user:command('new_worktree')
+  local form = user:view('/forms/new-worktree')
+  form:render()
+  local op = form:action('new_worktree', 'submit', {values = {repo = repo, branch = 'faults/view-lost', base = ''}}, 'view-lost')
+  expect(fault_fired(f)).to_be(true)
+  expect(op.status).to_be('succeeded')
+  expect(op.result.created).to_be(true)
+  expect(workers_in(op.result.path)).to_be(1)
+end)
+
+test('transport error: an unavailable hub.spawn stays unavailable; the retry spawns once', function()
+  local f = fault({point = 'action', action = 'hub.spawn', when = 'before', mode = 'fail', fail_code = 'unavailable', key = 'worktree-open/transport'})
+  local before = workers_in(tree.path)
+  local e = expect_error(function() alice:call('worktree.open', {path = tree.path, key = 'transport'}) end)
+  expect(e.code).to_be('unavailable')
+  expect(fault_fired(f)).to_be(true)
+  expect(workers_in(tree.path)).to_be(before)
+  W.settle(function() return alice:call('worktree.open', {path = tree.path, key = 'transport'}) end)
+  expect(workers_in(tree.path)).to_be(before + 1)
+end)
+
+test('transport error on the view path: the hub retries Open; a definite hub failure ends the operation', function()
+  local f = fault({point = 'action', action = 'hub.spawn', when = 'before', mode = 'fail', fail_code = 'unavailable', key = 'worktree-open/view-transport'})
+  local before = workers_in(tree.path)
+  local op = menu(tree.path):action('worktree_menu', 'run', {item_id = 'open_tab'}, 'view-transport')
+  expect(fault_fired(f)).to_be(true)
+  expect(op.status).to_be('succeeded')
+  expect(workers_in(tree.path)).to_be(before + 1)
+  -- A definite failure (code failed) is final: no retry, no spawn.
+  local g = fault({point = 'action', action = 'hub.spawn', when = 'before', mode = 'fail', key = 'worktree-open/view-definite'})
+  op = menu(tree.path):action('worktree_menu', 'run', {item_id = 'open_tab'}, 'view-definite')
+  expect(fault_fired(g)).to_be(true)
+  expect(op.status).to_be('failed')
+  expect(op.error.code).to_be('failed')
+  expect(workers_in(tree.path)).to_be(before + 1)
+end)
+
+test('a failed spawn is open_failed on both paths', function()
+  local f = fault({point = 'spawn-create', mode = 'refuse', op = 'worktree-open/refused'})
+  expect_error(function() W.settle(function() return alice:call('worktree.open', {path = tree.path, key = 'refused'}) end) end, 'open_failed')
+  expect(fault_fired(f)).to_be(true)
+  -- The replay returns the same failure.
+  expect_error(function() alice:call('worktree.open', {path = tree.path, key = 'refused'}) end, 'open_failed')
+  local g = fault({point = 'spawn-create', mode = 'refuse', op = 'worktree-open/view-refused'})
+  local op = menu(tree.path):action('worktree_menu', 'run', {item_id = 'open_tab'}, 'view-refused')
+  expect(fault_fired(g)).to_be(true)
+  expect(op.status).to_be('failed')
+  expect(op.error.code).to_be('open_failed')
+end)
+
+test('a pending spawn is running on both paths until it ends; its session going away fails it', function()
+  -- Tool: the create request is dropped, so the spawn stays pending in its own session.
+  local f = fault({point = 'spawn-create', mode = 'drop', op = 'worktree-open/pending'})
+  local r = alice:call('worktree.open', {path = tree.path, key = 'pending', where = 'session'})
+  expect(fault_fired(f)).to_be(true)
+  expect(r.status).to_be('running')
+  expect(alice:call('worktree.open', {path = tree.path, key = 'pending', where = 'session'}).status).to_be('running')
+  close_session(r.session_id)
+  wait('the pending spawn fails', function()
+    local ok, e = pcall(function() return alice:call('worktree.open', {path = tree.path, key = 'pending', where = 'session'}) end)
+    return not ok and tostring(e.message or e):find('session gone', 1, true)
+  end, 30)
+  -- View: Open in new session stays pending while the spawn is pending; the hub does not commit it.
+  local g = fault({point = 'spawn-create', mode = 'drop', op = 'worktree-open/view-pending'})
+  local m = menu(tree.path)
+  local _, key = m:admit('action', {node_id = 'worktree_menu', action = 'run', input = {item_id = 'open_session'}, revision = m.revision, operation_key = 'view-pending'})
+  wait('the spawn is pending', function() return fault_fired(g) end, 20)
+  rex.sleep(1.5)
+  expect(operation(key).status).to_be('pending')
+  close_session(W.intent('user', 'worktree-open/view-pending').request.placement.session)
+  local op = m:settle(key, 30)
+  expect(op.status).to_be('failed')
+  expect(op.error.code).to_be('open_failed')
+end)
+
+test('a failed unlock keeps the lock and the cleanup; the retry unlocks and returns the result', function()
+  local made = create('faults/unlock', 'unlock-create')
+  local f = fault({point = 'action', action = 'hub.cwd.unlock', when = 'before', mode = 'fail', fail_code = 'unavailable', key = id('unlock')})
+  local e = expect_error(function() W.settle(function() return alice:call('worktree.remove', {path = made.path, key = 'unlock'}) end) end)
+  expect(e.code).to_be('unavailable')
+  expect(fault_fired(f)).to_be(true)
+  -- The result committed; the cleanup is pending.
+  local pending = store('catalog').value.pending[id('unlock')]
+  expect(pending.phase).to_be('cleanup')
+  expect(W.try({'test', '-e', made.path}).ok).to_be(false)
+  -- The hub lock is held: a spawn into the path is refused by the lock.
+  W.run({'mkdir', made.path})
+  expect_error(function() alice:hub('hub.spawn', {profile = 'sleep', key = 'into-unlock', cwd = made.path}) end, 'is locked by')
+  -- The retry finishes the unlock and returns the committed result.
+  expect(alice:call('worktree.remove', {path = made.path, key = 'unlock'}).removed).to_be(true)
+  expect(store('catalog').value.pending[id('unlock')]).to_be(nil)
+  local w = alice:hub('hub.spawn', {profile = 'sleep', key = 'after-retry-unlock', cwd = made.path})
+  alice:hub('hub.stop', {spawn_id = w.spawn_id})
+  W.run({'rmdir', made.path})
+end)
+
+test('failed invalidations do not strand a scan: later changes still refresh the panel', function()
+  user:command('worktrees')
+  local panel = user:view('/panels/worktrees')
+  local function detail()
+    for _, it in ipairs(node(panel:render(), 'worktrees').items) do if it.id == tree.path then return it.detail end end
+    return ''
+  end
+  wait('clean first', function() return detail():find('clean', 1, true) end, 20)
+  local first = fault({point = 'action', action = 'hub.ui.invalidate', when = 'before', mode = 'fail', fail_code = 'unavailable', nth = 1})
+  local second = fault({point = 'action', action = 'hub.ui.invalidate', when = 'before', mode = 'fail', fail_code = 'unavailable', nth = 2})
+  W.write(tree.path .. '/inval-change', 'keep')
+  panel:seen('focus')
+  wait('focus shows dirty', function() return detail():find('dirty', 1, true) end, 20)
+  wait('both invalidations failed', function() return fault_fired(first) and fault_fired(second) end, 20)
+  W.run({'rm', tree.path .. '/inval-change'})
+  panel:seen('focus')
+  wait('a later change shows clean', function() return detail():find('clean', 1, true) end, 20)
+end)
