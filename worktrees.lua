@@ -94,9 +94,9 @@ local function catalog()
   local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
   if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing worktree catalog') end
   local state = r.value or {repos = {}, pending = {}}
-  -- owners[path] = {agent, identity}: the agent that created the tree, and the tree's identity.
-  -- A catalog from an older version has no owners, so its trees are user-only.
-  state.owners = state.owners or {}
+  -- An older version kept owners (the agent that created a tree). No rule uses them (the user's
+  -- decision, LazyRex decisions.md): an agent may remove any tree. The next save drops them.
+  state.owners = nil
   return state, r.rev
 end
 -- A caller is the user (the view path) or an agent (hub.identify). aliases are the agent ID and its
@@ -108,10 +108,6 @@ local function agent_caller(who)
     if type(id) == 'string' and id ~= '' and not seen[id] then aliases[#aliases + 1] = id; seen[id] = true end
   end
   return {agent = who.agent, aliases = aliases, session = who.session_id}
-end
-local function is_alias(caller, id)
-  for _, alias in ipairs(caller.aliases) do if alias == id then return true end end
-  return false
 end
 local function save(state, rev, op)
   local args = {ops = {{key = 'catalog', if_rev = rev, value = state}}}
@@ -207,13 +203,6 @@ local function finish(id, op, result)
   local state, rev = catalog()
   op.phase = 'cleanup'
   state.pending[id] = op
-  -- Ownership commits with the result. An operation from an older version has no actor and
-  -- grants no ownership. A removal clears the owner of that path.
-  if op.kind == 'create' and result.created == true and op.actor then
-    state.owners[op.path] = {agent = op.actor, identity = identity(op.path)}
-  elseif op.kind == 'remove' and result.removed == true then
-    state.owners[op.path] = nil
-  end
   save(state, rev, {key = id, fingerprint = op.fingerprint, result = result})
   cleanup_done(id)
   if result.error then fail(result.error.code, result.error.message) end
@@ -324,14 +313,6 @@ local function remove(caller, id, fingerprint, args, pending)
     if info.top ~= path or not tree or tree.bare or path == info.repo then fail('refused', 'Select a linked worktree, not the main repository') end
     op = {kind = 'remove', fingerprint = fingerprint, repo = info.repo, common = info.common, actor = caller.agent,
       path = path, branch = tree.branch or '', identity = identity(path), phase = 'prepared'}
-    -- The user removes any managed tree. An agent removes only a tree that it created, and only
-    -- while the tree at that path is the same tree (hub.stop has the same rule for workers).
-    if not caller.user then
-      local owner = catalog().owners[path]
-      if type(owner) ~= 'table' or not is_alias(caller, owner.agent) or owner.identity ~= op.identity then
-        fail('refused', 'An agent can remove only a worktree that it created. Ask the user to remove this one.')
-      end
-    end
     admit(id, op)
   end
   if op.phase == 'sending' then
@@ -1100,7 +1081,7 @@ local actions = {
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory.',
     args = {type = 'object', properties = {repo = {type = 'string'}}, additionalProperties = false}},
   {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
-    description = 'Remove a managed linked worktree that you created (the user can remove any). Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
+    description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
     args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
   {name = 'worktree.open', kind = 'client', title = 'Open a worktree',
     description = 'Start a profile (default shell; hub.profiles lists them, for example an agent) with the worktree as its directory, in a new tab of your session (where=tab) or in a new session (where=session). After worktree.create, open a shell with this action, as the New Worktree form does. You own the worker (hub.stop). Choose a key; after an unknown outcome or a running result, retry with the same key and content.',

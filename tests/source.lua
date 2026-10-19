@@ -114,7 +114,7 @@ test('removal advice: ignored files, then a worker (hub.changed), then clear; ad
   wait('worker advice', function() return check():find(w.spawn_id, 1, true) end, 20)
   alice:hub('hub.stop', {spawn_id = w.spawn_id})
   wait('clear advice', function() return check() == '' end, 20)
-  -- No lock: the owner removes the tree at once, then creates it again for the next tests.
+  -- No lock: alice removes the tree at once, then creates it again for the next tests.
   expect(W.settle(function() return alice:call('worktree.remove', {path = tree.path, key = 'advice-rm'}) end).removed).to_be(true)
   tree = W.settle(function() return alice:call('worktree.create', {repo = repo, branch = 'src/one', key = 'src-one-again'}) end)
   rex.call('block.close', {session_id = form.session, block_id = form.block})
