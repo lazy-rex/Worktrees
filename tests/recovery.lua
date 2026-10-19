@@ -7,6 +7,8 @@ local lab = H.args.lab
 local repo = W.repo('recovery')
 local alice = agent('alice')
 
+write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
+
 local function id(key) return W.part('alice') .. W.part(key) end
 local function pending(key) return ((store('catalog').value or {}).pending or {})[id(key)] end
 -- worktrees_with counts the worktrees of a branch (git worktree list --porcelain).
@@ -66,9 +68,19 @@ test('remove: Git finished, the result did not commit; the lock stays until the 
   local op = pending('recover-remove')
   expect(op.phase).to_be('sending')
   expect(W.try({'test', '-e', made.path}).ok).to_be(false)
-  -- The pending operation still owns the path: a create of the same path is refused.
+  -- The plugin's pending-path admission: a create of the same path is refused.
   expect_error(function() alice:call('worktree.create', {key = 'other-create', repo = repo, branch = 'recovery/remove'}) end, 'Another operation owns this path')
+  -- The hub lock stays: hub.spawn checks the lock before the directory, so a spawn into the path
+  -- (an empty directory again) is refused by the lock only.
+  W.run({'mkdir', made.path})
+  expect_error(function() alice:hub('hub.spawn', {profile = 'sleep', key = 'into-locked', cwd = made.path}) end, 'is locked by')
+  W.run({'rmdir', made.path})
   rex.call('block.close', {session_id = op.session, block_id = op.block})
   expect(settle(function() return alice:call('worktree.remove', args) end).removed).to_be(true)
   expect(pending('recover-remove')).to_be(nil)
+  -- The retry releases the lock: the same spawn now starts.
+  W.run({'mkdir', made.path})
+  local w = alice:hub('hub.spawn', {profile = 'sleep', key = 'after-unlock', cwd = made.path})
+  alice:hub('hub.stop', {spawn_id = w.spawn_id})
+  W.run({'rmdir', made.path})
 end)
