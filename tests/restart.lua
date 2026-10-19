@@ -131,22 +131,15 @@ test('saved results replay after a restart: create, open and remove', function()
   hub:restart({crash = true})
   expect(alice:call('worktree.remove', {key = 'durable-remove', path = first.path})).to_equal(removed)
   expect(W.try({'test', '-e', first.path}).ok).to_be(false)
-  -- The panel renders the repository after the restarts. Workaround: it opens from a new window.
-  -- testview attaches once and does not attach again after a hub restart (a harness gap, fix on
-  -- LazyRex branch testview-reattach); the real renderer attaches again. The hub refuses, by
-  -- design, to replace a side panel whose renderer is not attached. When the fix is on main, this
-  -- test replaces the first test's panel instead.
-  local S = H.args.tests_session
-  local before = {}
-  for _, w in ipairs(rex.call('session.view', {session_id = S}).windows or {}) do before[w.window_id] = true end
-  rex.call('session.new_window', {session_id = S, window_label = 'after-restart', layout = {block = {flavor = 'com.superlogical.terminal.shell',
-    label = 'after-restart', options = {command = {'/bin/sleep', '600'}, cwd = repo, login = false}}}})
-  local block
-  for _, w in ipairs(rex.call('session.view', {session_id = S}).windows or {}) do
-    if not before[w.window_id] then block = w.layers[1].blocks[1].block_id end
-  end
-  user:command('worktrees', {session = S, block = block})
-  local tree = user:view('/panels/worktrees', nil, S):render()
+  -- The panel renders the repository after the restarts. The first test's panel is still in the
+  -- tests window; its renderer attached again after each restart, so the palette replaces it.
+  local earlier = {}
+  for _, v in ipairs(H.views()) do if v.route == '/panels/worktrees' then earlier[v.view_id] = true end end
+  expect(next(earlier) ~= nil, 'the earlier panel is still open').to_be(true)
+  user:command('worktrees')
+  local panel = user:view('/panels/worktrees')
+  expect(earlier[panel.id], 'a new panel replaced the earlier one').to_be(nil)
+  local tree = panel:render()
   local shows = false
   for _, it in ipairs(node(tree, 'worktrees').items) do if (it.detail or ''):find(repo, 1, true) or it.id == repo then shows = true end end
   expect(shows, 'the panel lists the repository').to_be(true)
