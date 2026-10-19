@@ -94,7 +94,10 @@ test('C: New Worktree… from the panel keeps the source repository; the submit 
   -- The palette runs in the panel's pane; the source stays the source pane.
   user:command('new_worktree', panel)
   local form = wait_view(src_window, '/forms/new-worktree', 'the form replaces the panel')
-  expect(form_value(form:render(), 'new_worktree', 'repo')).to_be(repo)
+  local form_tree = form:render()
+  expect(form_value(form_tree, 'new_worktree', 'repo')).to_be(repo)
+  -- The plugin text that panel-lab read on the screen (112-113): the submit label.
+  expect(node(form_tree, 'new_worktree').submit_action.label).to_be('Create worktree')
   local op = form:action('new_worktree', 'submit', {values = {repo = repo, branch = 'feat-a', base = ''}}, 'c-create')
   expect(op.status).to_be('succeeded')
   feat = W.root .. '/panel/feat-a'
@@ -112,7 +115,10 @@ test('D: Open in new tab makes the new tab active; Open in new session keeps the
   expect(panel:action('worktrees', 'select', {item_id = feat}).status).to_be('succeeded')
   local menu = wait_view(src_window, '/forms/worktree?path=', 'the tree menu')
   expect(menu.route).to_be(W.route('/forms/worktree', feat))
-  menu:render()
+  -- The menu item labels that panel-lab read on the screen (136, 147, 168, 187).
+  local items = {}
+  for _, it in ipairs(node(menu:render(), 'worktree_menu').items) do items[#items + 1] = it.label end
+  expect(items).to_equal({'Open in new tab', 'Open in new session', 'Start agent…', 'Remove…'})
   local first = spawn_windows(S, 'feat-a')[1]
   expect(menu:action('worktree_menu', 'run', {item_id = 'open_tab'}, 'd-open-tab').status).to_be('succeeded')
   local second = wait('a second shell tab', function()
@@ -154,7 +160,7 @@ test('E: Start agent… starts the chosen profile in the tree; the panel returns
   expect(labels).to_contain('Sleeper')
   profiles:action('profiles', 'select', {item_id = 'sleeper'})
   local form = wait_view(src_window, '/forms/worktree-agent/sleeper?path=', 'the profile form')
-  form:render()
+  expect(node(form:render(), 'start_agent').submit_action.label).to_be('Start')
   expect(form:action('start_agent', 'submit', {values = {placement = 'tab'}}, 'e-start').status).to_be('succeeded')
   local found
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do
@@ -199,6 +205,7 @@ test('G: after the shells close, Remove Worktree… (picker, then confirm) remov
     local tree = confirm:render()
     return node(tree, 'check') == nil and node(tree, 'help').text:find('never forces', 1, true)
   end, 20)
+  expect(node(confirm:render(), 'remove_worktree').submit_action.label).to_be('Remove worktree')
   expect(confirm:action('remove_worktree', 'submit', {values = {path = feat}}, 'g-remove').status).to_be('succeeded')
   expect(W.try({'test', '-e', feat}).ok).to_be(false)
   expect(W.git(repo, 'worktree', 'list')).not_to_contain(feat)
