@@ -7,7 +7,13 @@ local S = H.args.tests_session
 local repo = W.repo('source')
 local alice = agent('alice')
 
-write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
+local status_gate = lab .. '/status-gate'
+write_profiles({profiles = {
+  {id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}},
+  -- status: reports program status working (OSC 7501 root record) after the gate file exists.
+  {id = 'status', name = 'Status', kind = 'accessory', command = {'/bin/sh', '-c',
+    'while [ ! -e "$0" ]; do sleep 0.1; done; printf "\\033]7501;state=working\\007"; exec sleep 600', status_gate}},
+}})
 
 local function sview(s)
   rex.call('session.attach', {session_id = s, event_scope = 'session'})
@@ -172,4 +178,46 @@ test('list with a repository shows a worker whose directory is inside the tree',
   expect(found.spawn_id).to_be(w.spawn_id)
   alice:hub('hub.stop', {spawn_id = w.spawn_id})
   W.run({'rmdir', tree.path .. '/subdir'})
+end)
+
+-- git_runs counts the git status processes in the lab (GIT_TRACE, set in the manifest test.env).
+-- A scan (refresh) runs git status for each tree. A render runs no git status: it only resolves
+-- the source pane's repository (rev-parse, worktree list).
+local function git_runs()
+  local f = io.open(lab .. '/git-trace.log', 'r')
+  if not f then return 0 end
+  local n = 0
+  for line in f:lines() do if line:find('trace: built-in: git status', 1, true) then n = n + 1 end end
+  f:close()
+  return n
+end
+local function git_quiet()
+  local last = git_runs()
+  wait('Git is quiet', function()
+    rex.sleep(1)
+    local now = git_runs()
+    if now == last then return true end
+    last = now
+  end, 30)
+  return last
+end
+
+test('a worker program status change starts no scan (no git status); a worker set change does', function()
+  local b = pane(S, 'status-src', {'/bin/sleep', '600'}, repo)
+  local panel = panel_from(b)
+  local w = alice:hub('hub.spawn', {profile = 'status', key = 'status-worker', title = 'Status worker', cwd = tree.path})
+  wait('the panel shows the worker', function() return detail(panel, tree.path):find('Status worker', 1, true) end, 20)
+  local before = git_quiet()
+  -- The hub sends hub.changed workers for a worker's program status (program_status_changed).
+  W.write(status_gate, 'go')
+  wait('the hub reports the status', function()
+    for _, x in ipairs(H.hub('hub.workers', {}).workers or {}) do
+      if x.spawn_id == w.spawn_id and type(x.status) == 'table' and x.status.state == 'working' then return true end
+    end
+  end, 20)
+  rex.sleep(1.5)
+  expect(git_runs(), 'no git status (no scan) after a status change').to_be(before)
+  -- Control: a worker set change scans (the same hub.changed path).
+  alice:hub('hub.stop', {spawn_id = w.spawn_id})
+  wait('the worker change scans', function() return git_runs() > before end, 20)
 end)

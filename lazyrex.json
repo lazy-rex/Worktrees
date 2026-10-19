@@ -21,6 +21,9 @@
     "name": "Dave"
    }
   ],
+  "env": {
+   "GIT_TRACE": "${LAB}/git-trace.log"
+  },
   "parity_fixture": "tests/parity_fixture.lua",
   "parity_routes": [
    "/forms/worktree",
