@@ -505,9 +505,9 @@ local function refresh(repo_arg)
   if not repo_arg then snapshot = result; refresh_error = nil; pcall(invalidate) end
   return result
 end
--- The reply of worktree.list fits every client: one Rex control message is 64 KiB, and the
--- harness test client takes at most 48 KiB. Budgets, as encoded JSON: worktrees 16 KiB and
--- operations 24 KiB a page, the other fields 4 KiB, all of it 44 KiB.
+-- The reply of worktree.list fits every client: one Rex control message is 64 KiB (65536 bytes),
+-- and the harness test client takes at most 48 KiB (49152 bytes). Budgets, as encoded JSON:
+-- worktrees 16 KiB and operations 24 KiB a page, the other fields 4 KiB, all of it 44 KiB (45056).
 local page_limit, worktrees_bytes, operations_bytes, meta_bytes, reply_bytes = 50, 16384, 24576, 4096, 45056
 local function encoded(value) return #rex.json.encode(value) end
 -- cut keeps text within 1024 bytes, the ellipsis included, at a UTF-8 character boundary.
