@@ -1,6 +1,7 @@
 {
  "name": "worktrees",
  "main": "worktrees.lua",
+ "events": "all",
  "test": {
   "agents": [
    {
