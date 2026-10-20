@@ -492,16 +492,15 @@ local function refresh(repo_arg)
   local workers = hub('hub.workers').workers or {}
   if not repo_arg then worker_key = workers_key(workers) end
   local result = {worktrees = {}, root = root, refreshing = false, outstanding = 0, ui = previous and previous.ui}
+  -- The jobs wait here until every repository is listed: a refresh that fails queues nothing.
+  local jobs = {}
   for common, repo in pairs(repos) do
     for _, tree in ipairs(trees(common)) do
       local item = {path = tree.path, repo = repo, branch = tree.branch or '(detached)', managed = within(tree.path, root), workers = {}}
       if tree.bare then item.state = 'bare'
       else
-        -- A job of a refresh that fails later is dropped: its snapshot never becomes current.
         item.state = 'checking'
-        scans.last = scans.last + 1
-        scans.queue[scans.last] = {key = cache_key, snapshot = result, item = item}
-        result.outstanding = result.outstanding + 1
+        jobs[#jobs + 1] = {key = cache_key, snapshot = result, item = item}
       end
       for _, worker in ipairs(workers) do
         if type(worker.cwd) == 'string' and (worker.cwd == tree.path or within(worker.cwd, tree.path)) then
@@ -512,6 +511,11 @@ local function refresh(repo_arg)
     end
   end
   table.sort(result.worktrees, function(a, b) return a.path < b.path end)
+  for _, job in ipairs(jobs) do
+    scans.last = scans.last + 1
+    scans.queue[scans.last] = job
+  end
+  result.outstanding = #jobs
   result.refreshing = result.outstanding > 0
   snapshots[cache_key] = result
   if result.refreshing then arm_scans() end
@@ -784,7 +788,6 @@ collect_scans = function()
       end
     end
   end
-  -- A scan of a replaced snapshot finishes too: it frees its place, and its result is not used.
   local running = {}
   for _, job in ipairs(scans.running) do
     local result, err, done = nil, nil, false
@@ -813,27 +816,26 @@ collect_scans = function()
   if changed then pcall(invalidate) end
 end
 -- start_scans runs queued jobs within the limits. Only the scan timer calls it, so a list request
--- or a refresh starts no process. A job of a snapshot that is not current is dropped unstarted.
+-- or a refresh starts no process. Every queued job belongs to a current snapshot: a refresh
+-- queues its jobs only when it succeeds, and it does not replace a snapshot that refreshes.
 local function start_scans()
   local started, changed = 0, false
   while started < scan_starts and #scans.running < scan_running_limit and scans.first <= scans.last do
     local job = scans.queue[scans.first]
     scans.queue[scans.first] = nil
     scans.first = scans.first + 1
-    if snapshots[job.key] == job.snapshot then
-      started = started + 1
-      local ok, present = pcall(exists, job.item.path)
-      local handle, err
-      if ok and present then handle, err = rex.exec.start(status_command(job.item.path, false), {env = git_env, timeout = 30, detach = true}) end
-      if handle then
-        job.handle = handle
-        scans.running[#scans.running + 1] = job
-      else
-        if not ok then job.item.state = 'unavailable'; job.item.error = type(present) == 'table' and present.message or tostring(present)
-        elseif not present then job.item.state = 'missing'
-        else job.item.state = 'unavailable'; job.item.error = tostring(err) end
-        if scan_done(job) then changed = true end
-      end
+    started = started + 1
+    local ok, present = pcall(exists, job.item.path)
+    local handle, err
+    if ok and present then handle, err = rex.exec.start(status_command(job.item.path, false), {env = git_env, timeout = 30, detach = true}) end
+    if handle then
+      job.handle = handle
+      scans.running[#scans.running + 1] = job
+    else
+      if not ok then job.item.state = 'unavailable'; job.item.error = type(present) == 'table' and present.message or tostring(present)
+      elseif not present then job.item.state = 'missing'
+      else job.item.state = 'unavailable'; job.item.error = tostring(err) end
+      if scan_done(job) then changed = true end
     end
   end
   if scans.first > scans.last then scans.queue, scans.first, scans.last = {}, 1, 0 end

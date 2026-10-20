@@ -119,14 +119,42 @@ test('a missing tree and a failed start end their jobs; refreshing does not stay
   expect(#s.fake.started).to_be(5)
 end)
 
-test('the jobs of a refresh that failed are dropped unstarted (sandbox)', function()
+-- queued returns the number of jobs in the plugin's scan queue. A job that waits starts nothing,
+-- so only the queue shows it: the test reads the plugin's own scans table (debug.getupvalue).
+local function queued(s)
+  local seen = {}
+  local function find(fn)
+    if seen[fn] then return nil end
+    seen[fn] = true
+    for i = 1, 255 do
+      local name, v = debug.getupvalue(fn, i)
+      if not name then return nil end
+      if name == 'scans' and type(v) == 'table' and v.queue then return v end
+      if type(v) == 'function' then
+        local found = find(v)
+        if found then return found end
+      end
+    end
+  end
+  local scans = find(s.handlers.client_perform_requested)
+  assert_true(scans, 'the plugin scan queue is found')
+  return scans.last - scans.first + 1
+end
+
+test('a refresh that fails queues no job, also when it fails again; the next refresh scans its own trees (sandbox)', function()
   local s = sandbox({['/r/a'] = 4, ['/r/b'] = 4}, {'/r/a', '/r/b'})
-  -- The second repository fails, so the jobs of the first one are queued before the failure.
-  s.fake.fail_list = 2
-  local reply = s:perform('worktree.list', {}, s.agent)
-  expect(reply.error and reply.error.code).to_be('git_error')
+  for i = 1, 3 do
+    -- The second repository fails, after the trees of the first one are listed.
+    s.fake.lists, s.fake.fail_list = 0, 2
+    local reply = s:perform('worktree.list', {}, s.agent)
+    expect(reply.error and reply.error.code).to_be('git_error')
+    expect(queued(s), 'queued jobs after failure ' .. i).to_be(0)
+  end
+  s.fake.fail_list = nil
+  list(s)
+  expect(queued(s)).to_be(8)
   drain(s)
-  expect(#s.fake.started, 'no job of the failed refresh starts').to_be(0)
+  expect(#s.fake.started).to_be(8)
 end)
 
 test('a stale restart queues a new scan; it keeps the limits and ends (sandbox)', function()
