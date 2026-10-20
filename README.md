@@ -13,9 +13,10 @@ A refresh still lists the trees of each repository and matches the workers in th
 
 ## Git hooks
 
-Git runs the repository's hooks for each create and remove. A hook that fails makes the operation
-fail with `git_error`, but Git does not undo its own work: after a failed `post-checkout` hook, the
-worktree exists. The error keeps the end of the Git output, at most 4096 bytes of JSON.
+`git worktree add` runs the `post-checkout` hook when the checkout occurs
+([githooks](https://git-scm.com/docs/githooks#_post_checkout)). If that hook fails, the plugin
+returns `git_error`, and the created worktree remains. The error keeps the end of the Git output,
+at most 4096 bytes of JSON.
 
 ## Install
 
