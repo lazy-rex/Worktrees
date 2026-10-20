@@ -196,3 +196,18 @@ test('a long error is cut within 1024 bytes at a UTF-8 boundary', function()
   expect(valid_utf8(entry.error), 'the cut keeps whole characters').to_be(true)
   expect(#entry.error >= 1024 - 4, 'the cut keeps as much as fits').to_be(true)
 end)
+
+test('a locked tree whose directory moved is missing (Git marks it locked, not prunable)', function()
+  local moved = W.repo('list-moved')
+  local tree = create(moved, 'moved', 'moved-create')
+  W.git(moved, 'worktree', 'lock', tree.path)
+  W.run({'mv', tree.path, tree.path .. '.away'})
+  local entry = wait('the finished scan', function()
+    local r = alice:call('worktree.list', {repo = moved})
+    if r.refreshing then return nil end
+    for _, t in ipairs(r.worktrees or {}) do if t.path == tree.path then return t end end
+  end, 60)
+  expect(entry.state).to_be('missing')
+  W.run({'mv', tree.path .. '.away', tree.path})
+  W.git(moved, 'worktree', 'unlock', tree.path)
+end)

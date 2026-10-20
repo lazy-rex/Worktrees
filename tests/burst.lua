@@ -108,3 +108,32 @@ test('a burst of 30 spawns and 30 stops: the first list call answers; the list r
     return t and #(t.workers or {}) == 0 and t.state == 'clean'
   end, 30)
 end)
+
+-- busy_refusals counts the hub's calls to this plugin that Rex refused with a full queue. The hub
+-- only logs a refused hub.changed, so a reply alone does not show a lost notification.
+local function busy_refusals()
+  local f = io.open(H.args.lab .. '/hub.log', 'r')
+  if not f then return 0 end
+  local n = 0
+  for l in f:lines() do if l:find('"lazyrex-plugin:worktrees" is busy', 1, true) then n = n + 1 end end
+  f:close()
+  return n
+end
+
+test('with about 100 trees, a burst of 16 spawns and 16 stops: no call to the plugin is refused', function()
+  local more = {}
+  for i = 31, 100 do more[#more + 1] = string.format("git -C '%s' worktree add -q -b extra-%02d '%s/burst/extra-%02d' >/dev/null", repo, i, W.root, i) end
+  W.run({'/bin/sh', '-c', table.concat(more, ' && ')})
+  wait('the scan of 101 trees ends', function()
+    local r = alice:call('worktree.list', {repo = repo})
+    return not r.refreshing and r.worktrees_next ~= nil
+  end, 60)
+  local before = busy_refusals()
+  local spawned = {}
+  for i = 1, 16 do spawned[i] = alice:hub('hub.spawn', {profile = 'sleep', key = 'many-' .. i, cwd = tree.path}).spawn_id end
+  alice:call('worktree.list', {repo = repo})
+  for _, id in ipairs(spawned) do alice:hub('hub.stop', {spawn_id = id}) end
+  alice:call('worktree.list', {repo = repo})
+  rex.sleep(2)
+  expect(busy_refusals() - before, 'refused calls to the plugin').to_be(0)
+end)

@@ -460,6 +460,19 @@ local requested_repo
 local worker_key
 local advice_generation = 0
 local removal_advice = {}
+-- The scan queue, for all snapshots together. A refresh starts no process: it queues one job a tree
+-- (an existence check, then git status). Only the scan timer runs jobs: at most 8 start in one
+-- tick, and at most 8 git status processes run. So the process work of one tick has a limit; a
+-- refresh (the tree lists, the items, the worker match) still grows with the number of trees.
+-- scans.queue holds the jobs from first to last; scans.running the started ones.
+local scan_starts, scan_running_limit = 8, 8
+local scans = {queue = {}, first = 1, last = 0, running = {}}
+-- scan_done counts a job as ended. It reports whether a shown snapshot changed: the current
+-- snapshot of all repositories, or a repository snapshot that the panel uses.
+local function scan_done(job)
+  job.snapshot.outstanding = job.snapshot.outstanding - 1
+  return snapshots[job.key] == job.snapshot and (job.key == '' or job.snapshot.ui == true)
+end
 local function workers_key(workers)
   local rows = {}
   for _, worker in ipairs(workers) do
@@ -478,17 +491,17 @@ local function refresh(repo_arg)
   if repo_arg then local info = repo_info(repo_arg); repos = {[info.common] = info.repo} end
   local workers = hub('hub.workers').workers or {}
   if not repo_arg then worker_key = workers_key(workers) end
-  local result = {worktrees = {}, root = root, refreshing = false, handles = {}, ui = previous and previous.ui}
+  local result = {worktrees = {}, root = root, refreshing = false, outstanding = 0, ui = previous and previous.ui}
   for common, repo in pairs(repos) do
     for _, tree in ipairs(trees(common)) do
       local item = {path = tree.path, repo = repo, branch = tree.branch or '(detached)', managed = within(tree.path, root), workers = {}}
       if tree.bare then item.state = 'bare'
-      elseif not exists(tree.path) then item.state = 'missing'
       else
-        local handle, err = rex.exec.start(status_command(tree.path, false), {env = git_env, timeout = 30, detach = true})
-        item.state = handle and 'checking' or 'unavailable'
-        if handle then result.handles[#result.handles + 1] = {handle = handle, item = item}
-        else item.error = tostring(err) end
+        -- A job of a refresh that fails later is dropped: its snapshot never becomes current.
+        item.state = 'checking'
+        scans.last = scans.last + 1
+        scans.queue[scans.last] = {key = cache_key, snapshot = result, item = item}
+        result.outstanding = result.outstanding + 1
       end
       for _, worker in ipairs(workers) do
         if type(worker.cwd) == 'string' and (worker.cwd == tree.path or within(worker.cwd, tree.path)) then
@@ -499,7 +512,7 @@ local function refresh(repo_arg)
     end
   end
   table.sort(result.worktrees, function(a, b) return a.path < b.path end)
-  result.refreshing = #result.handles > 0
+  result.refreshing = result.outstanding > 0
   snapshots[cache_key] = result
   if result.refreshing then arm_scans() end
   if not repo_arg then snapshot = result; refresh_error = nil; pcall(invalidate) end
@@ -771,33 +784,60 @@ collect_scans = function()
       end
     end
   end
-  for key, cached in pairs(snapshots) do
-    local running = false
-    for _, scan in ipairs(cached.handles) do
-      if scan.handle then
-        if scan.handle:running() then running = true
-        else
-          local result, err = scan.handle:wait(0.001)
-          if not result and err == 'timeout' then running = true
-          elseif result and result.ok then
-            scan.handle = nil
-            if key == '' or cached.ui then changed = true end
-            scan.item.dirty = result.stdout ~= ''
-            scan.item.state = scan.item.dirty and 'dirty' or 'clean'
-          else
-            scan.handle = nil; scan.item.state = 'unavailable'; scan.item.error = result and result.stderr or tostring(err)
-            if key == '' or cached.ui then changed = true end
-          end
-        end
-      end
+  -- A scan of a replaced snapshot finishes too: it frees its place, and its result is not used.
+  local running = {}
+  for _, job in ipairs(scans.running) do
+    local result, err, done = nil, nil, false
+    if not job.handle:running() then
+      result, err = job.handle:wait(0.001)
+      done = result ~= nil or err ~= 'timeout'
     end
-    cached.refreshing = running
-    if not running and cached.stale then
+    if not done then running[#running + 1] = job
+    else
+      if result and result.ok then
+        job.item.dirty = result.stdout ~= ''
+        job.item.state = job.item.dirty and 'dirty' or 'clean'
+      else job.item.state = 'unavailable'; job.item.error = result and result.stderr or tostring(err) end
+      if scan_done(job) then changed = true end
+    end
+  end
+  scans.running = running
+  for key, cached in pairs(snapshots) do
+    cached.refreshing = cached.outstanding > 0
+    if not cached.refreshing and cached.stale then
       cached.stale = nil
       local ok, err = pcall(refresh, key ~= '' and key or nil)
       if not ok then cached.error = type(err) == 'table' and err.message or tostring(err) end
-    elseif not running and key ~= '' and key ~= requested_repo and not cached.ui then snapshots[key] = nil end
+    elseif not cached.refreshing and key ~= '' and key ~= requested_repo and not cached.ui then snapshots[key] = nil end
   end
+  if changed then pcall(invalidate) end
+end
+-- start_scans runs queued jobs within the limits. Only the scan timer calls it, so a list request
+-- or a refresh starts no process. A job of a snapshot that is not current is dropped unstarted.
+local function start_scans()
+  local started, changed = 0, false
+  while started < scan_starts and #scans.running < scan_running_limit and scans.first <= scans.last do
+    local job = scans.queue[scans.first]
+    scans.queue[scans.first] = nil
+    scans.first = scans.first + 1
+    if snapshots[job.key] == job.snapshot then
+      started = started + 1
+      local ok, present = pcall(exists, job.item.path)
+      local handle, err
+      if ok and present then handle, err = rex.exec.start(status_command(job.item.path, false), {env = git_env, timeout = 30, detach = true}) end
+      if handle then
+        job.handle = handle
+        scans.running[#scans.running + 1] = job
+      else
+        if not ok then job.item.state = 'unavailable'; job.item.error = type(present) == 'table' and present.message or tostring(present)
+        elseif not present then job.item.state = 'missing'
+        else job.item.state = 'unavailable'; job.item.error = tostring(err) end
+        if scan_done(job) then changed = true end
+      end
+    end
+  end
+  if scans.first > scans.last then scans.queue, scans.first, scans.last = {}, 1, 0 end
+  -- A snapshot whose last job ended here stops refreshing in the next collect_scans.
   if changed then pcall(invalidate) end
 end
 arm_scans = function()
@@ -805,9 +845,9 @@ arm_scans = function()
   scan_timer = rex.after(0.2, function()
     scan_timer = nil
     collect_scans()
-    for _, cached in pairs(snapshots) do
-      if cached.refreshing then arm_scans(); break end
-    end
+    start_scans()
+    collect_scans()
+    if scans.first <= scans.last or #scans.running > 0 then arm_scans(); return end
     for _, advice in pairs(removal_advice) do
       if advice.handle then arm_scans(); break end
     end
