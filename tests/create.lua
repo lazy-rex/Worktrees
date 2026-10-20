@@ -23,13 +23,12 @@ end
 local function remove(key, path)
   return W.settle(function() return alice:call('worktree.remove', {key = key, path = path}) end)
 end
+-- A wait callback returns its value (tests/upvalue.lua).
 local function list(args, predicate)
-  local result
-  wait('the worktree list', function()
-    result = alice:call('worktree.list', args or {})
-    return predicate(result.worktrees or {})
+  return wait('the worktree list', function()
+    local result = alice:call('worktree.list', args or {})
+    return predicate(result.worktrees or {}) and result
   end, 30)
-  return result
 end
 local function row(rows, path) for _, t in ipairs(rows) do if t.path == path then return t end end end
 -- advice opens the remove confirmation for path and returns its check text when the check ends:
@@ -45,15 +44,14 @@ local function advice(path, want)
   -- The refresh comes in the plugin's next tick (about 0.2 s), so a render before it can show
   -- the earlier advice.
   form:seen('focus')
-  local text
-  wait('the removal check ends', function()
+  -- The text is the value of the wait ('' is a value in Lua).
+  return wait('the removal check ends', function()
     local check = node(form:render(), 'check')
-    text = check and check.text or ''
+    local text = check and check.text or ''
     if text:find('Checking') then return false end
-    if want == '' then return text == '' end
-    return want == nil or text:find(want, 1, true) ~= nil
+    if want == '' then return text == '' and text end
+    return (want == nil or text:find(want, 1, true) ~= nil) and text
   end, 20)
-  return text
 end
 local function locked(path) return advice(path) ~= '' end
 local function exists(path) return W.try({'test', '-e', path}).ok end

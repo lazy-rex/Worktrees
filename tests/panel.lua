@@ -78,11 +78,10 @@ end)
 test('B: Worktrees… opens the panel in the source tab; the source repository comes first', function()
   user:command('worktrees', {session = S, block = src})
   local panel = wait_view(src_window, '/panels/worktrees', 'the panel in the source tab')
-  local tree
-  wait('the source repository row is clean', function()
-    tree = panel:render()
-    local first = node(tree, 'worktrees').items[1]
-    return first and first.id == repo and first.detail:find('clean', 1, true)
+  local tree = wait('the source repository row is clean', function()
+    local rendered = panel:render()
+    local first = node(rendered, 'worktrees').items[1]
+    return first and first.id == repo and first.detail:find('clean', 1, true) and rendered
   end, 20)
   expect(node(tree, 'new').text).to_be('Repository: ' .. repo)
   expect(node(tree, 'worktrees').items[1].label).to_be('main')

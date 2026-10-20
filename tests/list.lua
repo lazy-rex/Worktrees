@@ -151,16 +151,15 @@ test('a tree with too many workers is compact: workers_count, and hub.workers li
   end
   -- The full entry does not fit after the main tree, so the page ends there; on the next (empty)
   -- page it does not fit either, so it is compact. A busy reply while waiting is retried.
-  local entry
-  wait('the compact entry', function()
+  local entry = wait('the compact entry', function()
     local ok, seen = pcall(pages, busy)
     if not ok then
       if tostring(seen.message or seen):find('is busy', 1, true) then return nil end
       error(seen, 0)
     end
-    entry = seen[tree.path]
+    local e = seen[tree.path]
     -- The finished scan: dirty is known only after git status.
-    return entry and entry.compact and entry.state ~= 'checking'
+    return e and e.compact and e.state ~= 'checking' and e
   end, 60)
   expect(entry.workers_count).to_be(16)
   expect(entry.workers).to_be(nil)
@@ -187,11 +186,9 @@ test('a long error is cut within 1024 bytes at a UTF-8 boundary', function()
   -- point fall inside a 2-byte character.
   W.git(bad, 'config', 'extensions.worktreeConfig', 'true')
   W.git(tree.path, 'config', '--worktree', 'core.bare', 'x' .. string.rep('é', 700))
-  local entry
-  wait('the failed status', function()
+  local entry = wait('the failed status', function()
     local r = alice:call('worktree.list', {repo = bad})
-    for _, t in ipairs(r.worktrees or {}) do if t.path == tree.path and t.error then entry = t end end
-    return entry
+    for _, t in ipairs(r.worktrees or {}) do if t.path == tree.path and t.error then return t end end
   end, 60)
   expect(#entry.error <= 1024, 'error within 1024 bytes').to_be(true)
   expect(entry.error:sub(-#'…')).to_be('…')

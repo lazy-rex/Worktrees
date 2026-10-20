@@ -34,11 +34,10 @@ end
 test('the scan does not write the index; the tree is clean', function()
   local tree = create('locks/scan', 'scan').path
   local index, before = stale(tree)
-  local row
-  wait('the scan of the tree ends', function()
+  local row = wait('the scan of the tree ends', function()
     local r = alice:call('worktree.list', {repo = repo})
-    for _, t in ipairs(r.worktrees or {}) do if t.path == tree then row = t end end
-    return not r.refreshing and row and row.state ~= 'checking'
+    if r.refreshing then return nil end
+    for _, t in ipairs(r.worktrees or {}) do if t.path == tree and t.state ~= 'checking' then return t end end
   end, 30)
   expect(row.state).to_be('clean')
   expect(bytes(index) == before, 'the index is unchanged').to_be(true)
@@ -65,11 +64,10 @@ test('the removal advice does not write the index; it shows the untracked file',
   expect(op.status).to_be('succeeded')
   local form = user:view(W.route('/forms/remove-worktree', tree))
   form:seen('focus')
-  local text
-  wait('the removal check ends', function()
+  local text = wait('the removal check ends', function()
     local check = node(form:render(), 'check')
-    text = check and check.text or ''
-    return text ~= '' and not text:find('Checking', 1, true)
+    local t = check and check.text or ''
+    return t ~= '' and not t:find('Checking', 1, true) and t
   end, 20)
   expect(text).to_match('changes or ignored files')
   expect(bytes(index) == before, 'the index is unchanged').to_be(true)

@@ -168,12 +168,10 @@ end)
 test('list with a repository shows a worker whose directory is inside the tree', function()
   W.run({'mkdir', '-p', tree.path .. '/subdir'})
   local w = alice:hub('hub.spawn', {profile = 'sleep', key = 'sub-worker', cwd = tree.path .. '/subdir'})
-  local found
-  wait('the worker in the list', function()
+  local found = wait('the worker in the list', function()
     for _, t in ipairs(alice:call('worktree.list', {repo = repo}).worktrees or {}) do
-      if t.path == tree.path and t.workers[1] then found = t.workers[1] end
+      if t.path == tree.path and t.workers[1] then return t.workers[1] end
     end
-    return found
   end, 20)
   expect(found.spawn_id).to_be(w.spawn_id)
   alice:hub('hub.stop', {spawn_id = w.spawn_id})
@@ -192,14 +190,15 @@ local function git_runs()
   return n
 end
 local function git_quiet()
-  local last = git_runs()
+  -- The callback keeps its state across polls in a table field (tests/upvalue.lua).
+  local seen = {last = git_runs()}
   wait('Git is quiet', function()
     rex.sleep(1)
     local now = git_runs()
-    if now == last then return true end
-    last = now
+    if now == seen.last then return true end
+    seen.last = now
   end, 30)
-  return last
+  return seen.last
 end
 
 test('a worker program status change starts no scan (no git status); a worker set change does', function()
