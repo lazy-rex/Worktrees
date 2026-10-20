@@ -151,11 +151,19 @@ test('a tree with too many workers is compact: workers_count, and hub.workers li
   end
   -- The full entry does not fit after the main tree, so the page ends there; on the next (empty)
   -- page it does not fit either, so it is compact.
-  local entry = wait('the compact entry', function()
+  -- A bounded loop, not wait(): wait() catches an error and polls again, so it would hide a busy
+  -- reply. Here any error of a call ends the test.
+  local entry
+  local deadline = os.time() + 60
+  repeat
     local e = pages(busy)[tree.path]
     -- The finished scan: dirty is known only after git status.
-    return e and e.compact and e.state ~= 'checking' and e
-  end, 60)
+    if e and e.compact and e.state ~= 'checking' then entry = e
+    else
+      assert_true(os.time() < deadline, 'the compact entry within 60 s')
+      rex.sleep(0.2)
+    end
+  until entry
   expect(entry.workers_count).to_be(16)
   expect(entry.workers).to_be(nil)
   expect(entry.branch).to_be('busy')
