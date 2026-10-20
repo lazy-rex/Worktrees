@@ -190,3 +190,30 @@ test('a stale restart queues a new scan; it keeps the limits and ends (sandbox)'
   expect(#s.fake.started, 'two scans of 11 trees').to_be(22)
   expect(list(s, {worktrees_after = '/'}).refreshing).to_be(false)
 end)
+
+test('Forget drops the snapshots of its repository: their queued jobs start nothing (sandbox)', function()
+  local s = sandbox({['/r/a'] = 4, ['/r/b'] = 20}, {'/r/a', '/r/b'})
+  s.hub_answers['hub.store.op'] = function() return {found = false} end
+  s.hub_answers['hub.store.batch'] = function(args)
+    s.catalog = args.ops[1].value
+    return {revs = {catalog = '2'}}
+  end
+  -- The /r/b snapshot queues 20 jobs, then the snapshot of all repositories 24.
+  expect(list(s, {repo = '/r/b'}).refreshing).to_be(true)
+  expect(list(s).refreshing).to_be(true)
+  expect(queued(s)).to_be(44)
+  s:tick()
+  expect(#s.fake.started, 'the first 8 jobs of /r/b').to_be(8)
+  finish(s)
+  local reply = s:perform('worktree.forget', {repo = '/r/b', key = 'f'}, s.agent)
+  expect(reply.result and reply.result.forgotten, tostring(reply.error and reply.error.message)).to_be(true)
+  expect(s.catalog.repos['/r/b/.git']).to_be(nil)
+  drain(s)
+  -- 8 of /r/b, the 24 jobs of all repositories (a row it drops still ends its job), then the
+  -- restart of the stale snapshot: /r/a only. The other 12 jobs of /r/b start nothing.
+  expect(#s.fake.started).to_be(8 + 24 + 4)
+  local all = list(s, {worktrees_after = '/'})
+  expect(all.refreshing).to_be(false)
+  expect(#all.worktrees).to_be(4)
+  for _, t in ipairs(all.worktrees) do expect(t.repo).to_be('/r/a') end
+end)

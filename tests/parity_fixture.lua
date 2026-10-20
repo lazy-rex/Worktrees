@@ -1,5 +1,6 @@
 -- Parity fixture (LazyRex docs/testing.md, "Agent parity"): renders the forms that open only from
--- another view (the tree menu, the remove confirmation and the Start agent forms).
+-- another view (the tree menu, the remove confirmation, the Start agent forms and the Forget
+-- repository confirmation).
 local W = load_fixture(FIXTURE:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local repo = W.repo('parity')
 local alice = agent('alice')
@@ -24,6 +25,10 @@ menu = opens(user:view('/panels/worktrees'), 'worktrees', 'select', {item_id = t
 local agent_route = W.route('/forms/worktree-agent', tree.path)
 local profiles = opens(menu, 'worktree_menu', 'run', {item_id = 'agent'}, agent_route)
 opens(profiles, 'profiles', 'select', {item_id = 'shell'}, W.route('/forms/worktree-agent/shell', tree.path))
+-- The main tree row of a recorded repository: Forget repository….
+user:command('worktrees')
+local repo_menu = opens(user:view('/panels/worktrees'), 'worktrees', 'select', {item_id = repo}, W.route('/forms/worktree', repo))
+opens(repo_menu, 'worktree_menu', 'run', {item_id = 'forget'}, W.route('/forms/forget-repository', repo))
 
 -- A stopped operation shows the Discard widget on the panel.
 local state = store('catalog').value

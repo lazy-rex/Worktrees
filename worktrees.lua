@@ -671,6 +671,129 @@ local function recorded_repos()
   table.sort(result)
   return result
 end
+local function recorded(state, repo)
+  for _, value in pairs(state.repos or {}) do if value == repo then return true end end
+  return false
+end
+-- Forget repository removes a recorded repository from the catalog. Nothing on disk changes, and no
+-- process stops: a worker in that repository keeps running, and only its row leaves the panel.
+-- Unconditional refusals: an unfinished operation in the repository; a worker with an unknown
+-- directory; a worker inside the recorded main path or inside a tree that Git lists now.
+-- When Git cannot list the repository, its linked trees are unknown. So each other worker outside
+-- every listable recorded repository is unattributed: the user or the agent must accept them.
+local function worker_lines(rows)
+  local out = {}
+  for i, row in ipairs(rows) do
+    if i > 20 then out[#out + 1] = '… and ' .. (#rows - 20) .. ' more'; break end
+    out[#out + 1] = cut(row)
+  end
+  return table.concat(out, '\n')
+end
+local function inside(path, paths)
+  for _, p in ipairs(paths) do if path == p or within(path, p) then return true end end
+  return false
+end
+-- forget_check returns the catalog keys (Git common directories) of repo, the unattributed workers
+-- as text rows, and the key of that worker set. It fails for a refusal.
+local function forget_check(state, repo)
+  local commons, own, unavailable = {}, {repo}, false
+  for common, value in pairs(state.repos) do
+    if value == repo then
+      commons[#commons + 1] = common
+      local rows = listed(common)
+      if not rows then unavailable = true end
+      for _, tree in ipairs(rows or {}) do own[#own + 1] = tree.path end
+    end
+  end
+  if not commons[1] then fail('not_found', 'This repository is not recorded') end
+  for _, op in pairs(state.pending) do
+    for _, common in ipairs(commons) do
+      if op.common == common then fail('refused', 'An unfinished operation uses this repository: ' .. tostring(op.kind) .. ' ' .. tostring(op.path)) end
+    end
+  end
+  local others = {}
+  if unavailable then
+    for common, value in pairs(state.repos) do
+      if value ~= repo then for _, tree in ipairs(listed(common) or {}) do others[#others + 1] = tree.path end end
+    end
+  end
+  local known, unattributed, keys = {}, {}, {}
+  for _, worker in ipairs(hub('hub.workers').workers or {}) do
+    local cwd = type(worker.cwd) == 'string' and worker.cwd ~= '' and worker.cwd or nil
+    local row = (worker.spawn_id or '?') .. ' · ' .. (cwd or 'unknown directory')
+    if not cwd or inside(cwd, own) then known[#known + 1] = row
+    elseif unavailable and not inside(cwd, others) then
+      unattributed[#unattributed + 1] = row
+      keys[#keys + 1] = part(worker.spawn_id or '') .. part(cwd)
+    end
+  end
+  if known[1] then
+    table.sort(known)
+    fail('refused', 'A worker uses this repository, or a worker has an unknown working directory.\n' .. worker_lines(known))
+  end
+  table.sort(unattributed)
+  table.sort(keys)
+  return commons, unattributed, 'workers/' .. table.concat(keys)
+end
+-- forget_cached drops the cached snapshots of repo, and its rows from the snapshot of all
+-- repositories. The panel of a pane in repo refreshes it again as its source (not recorded).
+local function forget_cached(repo)
+  for key, cached in pairs(snapshots) do
+    if key ~= '' then
+      for _, tree in ipairs(cached.worktrees or {}) do
+        if tree.repo == repo then snapshots[key] = nil; break end
+      end
+    end
+  end
+  local kept = {}
+  for _, tree in ipairs(snapshot.worktrees) do if tree.repo ~= repo then kept[#kept + 1] = tree end end
+  snapshot.worktrees = kept
+end
+-- forget: worktree.forget and the Forget repository form. The fingerprint is the path only, so
+-- accept_unattributed does not change the operation. Only a success is saved, with the catalog
+-- change in one batch: a refusal or needs_confirmation keeps the key free for a later call. A
+-- same-key retry returns the saved success and changes nothing, also after a create has recorded
+-- the repository again. shown (the form only): the worker set key that the form showed; when the
+-- set changed, forget returns {changed = true} and changes nothing.
+local function forget(caller, args, shown)
+  local repo, key = text(args.repo, 'repo'), text(args.key, 'key')
+  if args.accept_unattributed ~= nil and type(args.accept_unattributed) ~= 'boolean' then
+    fail('invalid_input', 'accept_unattributed must be a boolean')
+  end
+  local fingerprint = 'forget/' .. part(repo)
+  for _, alias in ipairs(caller.aliases) do
+    local saved = hub('hub.store.op', {key = part(alias) .. part(key)})
+    if saved.found then return result_of(saved, fingerprint) end
+  end
+  local id = part(caller.agent) .. part(key)
+  for _ = 1, 3 do
+    local state, rev = catalog()
+    for _, alias in ipairs(caller.aliases) do
+      if state.pending[part(alias) .. part(key)] then fail('operation_conflict', 'This key has different content') end
+    end
+    local commons, unattributed, set_key = forget_check(state, repo)
+    if shown ~= nil and shown ~= set_key then return {changed = true} end
+    if unattributed[1] and args.accept_unattributed ~= true then
+      fail('needs_confirmation', 'Git cannot list this repository, so these workers may use it. They keep running, but lose their row in the panel. To forget it, call again with accept_unattributed = true.\n' .. worker_lines(unattributed))
+    end
+    for _, common in ipairs(commons) do state.repos[common] = nil end
+    local result = {forgotten = true, repo = repo, unattributed_count = #unattributed}
+    if unattributed[1] then
+      result.unattributed_workers = {}
+      for i = 1, math.min(#unattributed, 20) do result.unattributed_workers[i] = cut(unattributed[i]) end
+    end
+    local saved = hub('hub.store.batch', {ops = {{key = 'catalog', if_rev = rev, value = state}},
+      op = {key = id, fingerprint = fingerprint, result = result}})
+    if saved.op_exists then return saved.op_exists.result end
+    if saved.conflict and saved.conflict.kind == 'operation' then fail('operation_conflict', 'This key has different content') end
+    if not saved.conflict then
+      if not saved.revs then fail('internal', 'Invalid store result') end
+      forget_cached(repo)
+      return result
+    end
+  end
+  fail('conflict', 'The worktree catalog changed; retry with the same key')
+end
 local function repo_default(context)
   if type(context) ~= 'table' or type(context.source_block_id) ~= 'string'
     or context.source_block_id == '' or type(context.session_id) ~= 'string' or context.session_id == '' then return nil end
@@ -846,27 +969,36 @@ collect_scans = function()
   end
   if changed then pcall(invalidate) end
 end
+-- start_job checks that the tree exists and starts its git status. It returns true when the job
+-- ended at once and a shown snapshot changed.
+local function start_job(job)
+  local ok, present = pcall(exists, job.item.path)
+  local handle, err
+  if ok and present then handle, err = rex.exec.start(status_command(job.item.path, false), {env = git_env, timeout = 30, detach = true}) end
+  if handle then
+    job.handle = handle
+    scans.running[#scans.running + 1] = job
+    return false
+  end
+  if not ok then job.item.state = 'unavailable'; job.item.error = type(present) == 'table' and present.message or tostring(present)
+  elseif not present then job.item.state = 'missing'
+  else job.item.state = 'unavailable'; job.item.error = tostring(err) end
+  return scan_done(job)
+end
 -- start_scans runs queued jobs within the limits. Only the scan timer calls it, so a list request
--- or a refresh starts no process. Every queued job belongs to a current snapshot: a refresh
--- queues its jobs only when it succeeds, and it does not replace a snapshot that refreshes.
+-- or a refresh starts no process. A refresh queues its jobs only when it succeeds, and it does not
+-- replace a snapshot that refreshes. But Forget drops the snapshots of its repository: a job of a
+-- dropped snapshot starts nothing.
 local function start_scans()
   local started, changed = 0, false
   while started < scan_starts and #scans.running < scan_running_limit and scans.first <= scans.last do
     local job = scans.queue[scans.first]
     scans.queue[scans.first] = nil
     scans.first = scans.first + 1
-    started = started + 1
-    local ok, present = pcall(exists, job.item.path)
-    local handle, err
-    if ok and present then handle, err = rex.exec.start(status_command(job.item.path, false), {env = git_env, timeout = 30, detach = true}) end
-    if handle then
-      job.handle = handle
-      scans.running[#scans.running + 1] = job
+    if snapshots[job.key] ~= job.snapshot then job.snapshot.outstanding = job.snapshot.outstanding - 1
     else
-      if not ok then job.item.state = 'unavailable'; job.item.error = type(present) == 'table' and present.message or tostring(present)
-      elseif not present then job.item.state = 'missing'
-      else job.item.state = 'unavailable'; job.item.error = tostring(err) end
-      if scan_done(job) then changed = true end
+      started = started + 1
+      if start_job(job) then changed = true end
     end
   end
   if scans.first > scans.last then scans.queue, scans.first, scans.last = {}, 1, 0 end
@@ -912,18 +1044,19 @@ end)
 -- The Worktrees panel and forms (the maintainer, 2026-10-17: no tab; palette commands and a side panel).
 -- A route carries a selected tree as a query: /forms/worktree?path=<percent-encoded path>.
 -- trees_for gives the known trees: the source repository first, then the recorded repositories.
+-- It also gives the main path of the source repository (nil when it has no rows).
 local function trees_for(source_repo)
-  local rows, seen = {}, {}
+  local rows, seen, main = {}, {}, nil
   if source_repo then
     local cached = snapshots[source_repo]
     if not cached then local ok, r = pcall(refresh, source_repo); cached = ok and r or nil end
     if cached then cached.ui = true end -- keep the scan for the panel; a scan end invalidates it
-    for _, tree in ipairs(cached and cached.worktrees or {}) do rows[#rows + 1] = tree; seen[tree.path] = true end
+    for _, tree in ipairs(cached and cached.worktrees or {}) do rows[#rows + 1] = tree; seen[tree.path] = true; main = main or tree.repo end
   end
   for _, tree in ipairs(snapshot.worktrees) do
     if not seen[tree.path] then rows[#rows + 1] = tree; seen[tree.path] = true end
   end
-  return rows
+  return rows, main
 end
 local function find_known(path)
   for _, tree in ipairs(snapshot.worktrees) do if tree.path == path then return tree end end
@@ -949,17 +1082,22 @@ end
 local function render_panel(context)
   local source = repo_default(context)
   local items = {}
-  for _, tree in ipairs(trees_for(source)) do
+  local rows, main = trees_for(source)
+  for _, tree in ipairs(rows) do
     items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree),
       action = {name = 'select', label = 'Actions…', enabled = true, user_only = 'navigation'}}
   end
+  local state = catalog()
+  -- The source repository shows also when the catalog does not record it (after Forget, or before
+  -- its first create): worktree.list and the panel of other panes do not show it.
+  local source_text = source and ('Repository: ' .. source .. ((main and not recorded(state, main)) and ' (not recorded)' or ''))
   local nodes = {
-    {id = 'new', type = 'widget', text = source and ('Repository: ' .. source) or 'The source pane is not in a Git repository.',
+    {id = 'new', type = 'widget', text = source_text or 'The source pane is not in a Git repository.',
       action = {name = 'new', label = 'New Worktree…', enabled = true, user_only = 'navigation'}},
     {id = 'worktrees', type = 'list', label = 'Worktrees', items = items},
     {id = 'refresh', type = 'widget', text = 'Managed root: ' .. root, action = {name = 'refresh', label = 'Refresh', enabled = true, tool = 'worktree.list'}},
   }
-  for id, op in pairs(catalog().pending) do
+  for id, op in pairs(state.pending) do
     nodes[#nodes + 1] = {id = 'pending/' .. id, type = 'widget', text = op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.',
       action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}}
   end
@@ -972,16 +1110,42 @@ end
 local function render_tree_menu(path)
   local tree = path and find_known(path)
   if not tree then fail('invalid_input', 'Unknown worktree') end
+  local items = {
+    {id = 'open_tab', label = 'Open in new tab', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
+    {id = 'open_session', label = 'Open in new session', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
+    {id = 'agent', label = 'Start agent…', action = {name = 'run', enabled = true, user_only = 'navigation'}},
+    {id = 'remove', label = 'Remove…', action = {name = 'run', enabled = removable(tree), user_only = 'navigation'}},
+  }
+  -- The main tree row of a repository, also the unavailable row: Forget repository.
+  if tree.path == tree.repo then
+    items[#items + 1] = {id = 'forget', label = 'Forget repository…', action = {name = 'run', enabled = recorded(catalog(), tree.repo), user_only = 'navigation'}}
+  end
   return {title = tree.branch, nodes = {
     {id = 'about', type = 'widget', text = tree_detail(tree)},
-    {id = 'worktree_menu', type = 'list', items = {
-      {id = 'open_tab', label = 'Open in new tab', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
-      {id = 'open_session', label = 'Open in new session', action = {name = 'run', enabled = true, tool = 'worktree.open'}},
-      {id = 'agent', label = 'Start agent…', action = {name = 'run', enabled = true, user_only = 'navigation'}},
-      {id = 'remove', label = 'Remove…', action = {name = 'run', enabled = removable(tree), user_only = 'navigation'}},
-    }},
+    {id = 'worktree_menu', type = 'list', items = items},
     cancel_node(),
   }}
+end
+-- The confirmation names the repository. It shows a refusal, or the unattributed workers. The
+-- form keeps the key of the shown worker set, so the submit can see a change.
+local function render_forget(path)
+  if not path then fail('invalid_input', 'Select a repository') end
+  local nodes = {{id = 'about', type = 'widget', text = 'Repository: ' .. path ..
+    '\nForget removes it from the recorded repositories. Nothing on disk changes: no file, branch or worktree. A new worktree in it records it again.'}}
+  local ok, commons, unattributed, set_key = pcall(forget_check, catalog(), path)
+  if not ok then
+    nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Forget will be refused:\n' .. (type(commons) == 'table' and tostring(commons.message) or tostring(commons))}
+    set_key = 'workers/'
+  elseif unattributed[1] then
+    nodes[#nodes + 1] = {id = 'unattributed', type = 'widget', text = 'These workers may use this repository; they keep running, but lose their row in the panel:\n' .. worker_lines(unattributed)}
+  end
+  local count = ok and #unattributed or 0
+  nodes[#nodes + 1] = {id = 'forget_repository', type = 'form', fields = {
+    {id = 'repo', label = 'Repository', kind = 'select', required = true, value = path, options = {{value = path, label = path}}},
+    {id = 'workers', label = 'Unattributed workers', kind = 'select', required = true, value = set_key, options = {{value = set_key, label = tostring(count)}}}},
+    submit_action = {name = 'submit', label = 'Forget repository', enabled = true, tool = 'worktree.forget'}}
+  nodes[#nodes + 1] = cancel_node()
+  return {title = 'Forget repository', nodes = nodes}
 end
 local function render_new(context)
   local source = repo_default(context)
@@ -1071,6 +1235,7 @@ local function ui_render(args)
   elseif base == '/forms/worktree' then tree = render_tree_menu(path)
   elseif base == '/forms/new-worktree' then tree = render_new(context)
   elseif base == '/forms/remove-worktree' then tree = render_remove(context, path)
+  elseif base == '/forms/forget-repository' then tree = render_forget(path)
   elseif base == '/forms/worktree-agent' then tree = render_profiles(path)
   elseif base:sub(1, 22) == '/forms/worktree-agent/' then tree = render_agent(base:sub(23), path)
   else fail('invalid_input', 'Unknown route') end
@@ -1236,6 +1401,7 @@ local function ui_action(args)
   elseif base == '/forms/worktree' and args.node_id == 'worktree_menu' and args.action == 'run' then
     if input.item_id == 'agent' then return {form = route_with_path('/forms/worktree-agent', path)} end
     if input.item_id == 'remove' then return {form = route_with_path('/forms/remove-worktree', path)} end
+    if input.item_id == 'forget' then return {form = route_with_path('/forms/forget-repository', path)} end
     if input.item_id == 'open_tab' or input.item_id == 'open_session' then
       return open_effect(open_menu(args, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
     end
@@ -1257,6 +1423,16 @@ local function ui_action(args)
     return {form = route_with_path('/forms/remove-worktree', input.item_id)}
   elseif base == '/forms/remove-worktree' and args.node_id == 'remove_worktree' and args.action == 'submit' then
     return submit_worktree(args)
+  elseif base == '/forms/forget-repository' and args.node_id == 'forget_repository' and args.action == 'submit' then
+    if args.user ~= 'user' then fail('refused', 'Only the user can submit a worktree form') end
+    local values = type(args.input) == 'table' and args.input.values or nil
+    if type(values) ~= 'table' then fail('invalid_input', 'Forget form values are required') end
+    -- The submit accepts the workers that the form showed. A changed set shows the form again.
+    local result = forget(user_caller, {repo = values.repo, key = text(args.operation_key, 'operation_key'), accept_unattributed = true},
+      text(values.workers, 'workers'))
+    if result.changed then return {form = route_with_path('/forms/forget-repository', values.repo)} end
+    refresh_safe()
+    return {close_form = true}
   elseif base == '/forms/worktree-agent' and args.node_id == 'profiles' and args.action == 'select' and type(input.item_id) == 'string' then
     return {form = route_with_path('/forms/worktree-agent/' .. input.item_id, path)}
   elseif base:sub(1, 22) == '/forms/worktree-agent/' and args.node_id == 'start_agent' and args.action == 'submit' then
@@ -1285,8 +1461,12 @@ local actions = {
     description = 'Discard a pending worktree operation (create or remove) that stopped. Name it with exactly one of: id, the full operation ID of any pending operation (worktree.list operations); or operation, the key of your own operation. Refused while its Git process runs or its start is unknown. Result: status discarded, or status complete when the operation had already ended by itself (its own key returns its result). key is the key of this discard; retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, id = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
       required = {'key'}, additionalProperties = false}},
+  {name = 'worktree.forget', kind = 'client', title = 'Forget a repository',
+    description = 'Remove a recorded repository from worktree.list and the panel. Nothing on disk changes: no file, branch, worktree or process. repo is the recorded repository path (a worktree.list row whose path equals its repo). Refused while an unfinished operation uses the repository, while a worker is inside the repository path or a tree that Git lists, and while a worker has an unknown directory. When Git cannot list the repository, workers outside every listable recorded repository may use it: the call fails with needs_confirmation and lists them; call again with the same key and accept_unattributed = true. A later worktree.create records the repository again. Choose a key; a same-key retry returns the saved result. A refusal is not saved.',
+    args = {type = 'object', properties = {repo = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}, accept_unattributed = {type = 'boolean'}},
+      required = {'repo', 'key'}, additionalProperties = false}},
 }
-local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard'}
+local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard', 'worktree.forget'}
 for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
   actions[#actions + 1] = {name = name, kind = 'client', title = name, args = {type = 'object', additionalProperties = true}}
 end
@@ -1346,6 +1526,7 @@ rex.on('client_perform_requested', function(ctx, ev)
       local key = text(args.key, 'key')
       return open_request(caller, args, {spawn = 'worktree-open/' .. key, ensure = 'agent-open/' .. part(caller.agent) .. part(key)}, nil, forwarded_pid)
     end
+    if ev.action == 'worktree.forget' then local result = forget(caller, args); refresh_safe(); return result end
     if ev.action == 'worktree.discard' then local result = discard_request(caller, {operation = args.operation, id = args.id}, args.key); refresh_safe(); return result end
     fail('not_supported', 'Unknown worktree action')
   end)

@@ -18,6 +18,25 @@ A refresh still lists the trees of each repository and matches the workers in th
 returns `git_error`, and the created worktree remains. The error keeps the end of the Git output,
 at most 4096 bytes of JSON.
 
+## Forget repository
+
+The menu of a repository row (its main tree, or the unavailable row of a repository that Git
+cannot list) has **Forget repository…**. Agents use `worktree.forget`. Forget removes the
+repository from the recorded repositories: `worktree.list` and the panel stop showing it. Nothing
+on disk changes, and no process stops. A later create in that repository records it again. The
+panel of a pane inside a forgotten repository still shows it as the source, marked "not recorded".
+
+Forget is refused while:
+
+- an unfinished operation uses the repository;
+- a worker is inside the recorded repository path, or inside a tree that Git lists now;
+- a worker has an unknown directory.
+
+When Git cannot list the repository, its linked trees are unknown, so a worker in one of them does
+not cause a refusal. Instead, each worker outside every listable recorded repository is "unattributed":
+the form lists them, and an agent gets `needs_confirmation` until it calls again with
+`accept_unattributed = true`. If the list changes before the submit, the form shows the new list.
+
 ## Install
 
 Check this repository out next to LazyRex, and add the plugin to the hub config:

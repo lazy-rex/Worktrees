@@ -83,7 +83,8 @@ test('B: Worktrees… opens the panel in the source tab; the source repository c
     local first = node(rendered, 'worktrees').items[1]
     return first and first.id == repo and first.detail:find('clean', 1, true) and rendered
   end, 20)
-  expect(node(tree, 'new').text).to_be('Repository: ' .. repo)
+  -- No create has recorded the repository yet.
+  expect(node(tree, 'new').text).to_be('Repository: ' .. repo .. ' (not recorded)')
   expect(node(tree, 'worktrees').items[1].label).to_be('main')
 end)
 
