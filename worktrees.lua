@@ -482,6 +482,15 @@ local function workers_key(workers)
   return table.concat(rows, '|')
 end
 local function invalidate() hub('hub.ui.invalidate', {}) end
+-- listed gives the trees of one recorded repository, or nil and the Git error when Git cannot list
+-- them (the repository was deleted or moved). Only that Git error is caught: any other error, for
+-- example a process that does not start, fails the refresh.
+local function listed(common)
+  local ok, rows = pcall(trees, common)
+  if ok then return rows end
+  if type(rows) ~= 'table' or rows.code ~= 'git_error' then error(rows, 0) end
+  return nil, rows.message
+end
 local function refresh(repo_arg)
   local cache_key = repo_arg or ''
   local previous = snapshots[cache_key]
@@ -495,7 +504,13 @@ local function refresh(repo_arg)
   -- The jobs wait here until every repository is listed: a refresh that fails queues nothing.
   local jobs = {}
   for common, repo in pairs(repos) do
-    for _, tree in ipairs(trees(common)) do
+    local rows, err = listed(common)
+    if not rows then
+      -- One row for the repository; the catalog keeps it, so a later refresh lists it again.
+      result.worktrees[#result.worktrees + 1] = {path = repo, repo = repo, branch = '(unavailable)', managed = false,
+        workers = {}, state = 'unavailable', error = err}
+    end
+    for _, tree in ipairs(rows or {}) do
       local item = {path = tree.path, repo = repo, branch = tree.branch or '(detached)', managed = within(tree.path, root), workers = {}}
       if tree.bare then item.state = 'bare'
       else
@@ -910,6 +925,7 @@ local function tree_detail(tree)
   local names = {}
   for _, worker in ipairs(tree.workers or {}) do names[#names + 1] = worker.title or worker.spawn_id end
   return tree.path .. '\n' .. (tree.state or 'unknown') .. (#names > 0 and (' · Workers: ' .. table.concat(names, ', ')) or '')
+    .. (type(tree.error) == 'string' and ('\n' .. cut(tree.error)) or '')
 end
 local function cancel_node()
   return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = 'Cancel', enabled = true}}

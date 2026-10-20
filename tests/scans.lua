@@ -11,7 +11,8 @@ local function sandbox(repos, recorded)
   local s = load_sandbox(tests_dir .. '/..', base)
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
   s:tick()
-  -- fail_list: the number of the git worktree list call that fails (nil: none fails).
+  -- fail_list: the number of the git worktree list call that fails (nil: none fails);
+  -- no_start_list: the number of the call whose process does not start.
   local fake = {missing = {}, start_fail = {}, started = {}, tests = 0, lists = 0}
   s.fake = fake
   local function ok(stdout) return {ok = true, stdout = stdout, stderr = ''} end
@@ -20,6 +21,7 @@ local function sandbox(repos, recorded)
       local top = argv[3]:gsub('/%.git$', '')
       fake.lists = fake.lists + 1
       if fake.lists == fake.fail_list then return {ok = false, stdout = '', stderr = 'fatal: not a git repository'} end
+      if fake.lists == fake.no_start_list then return nil, 'no fork' end
       local fields = {'worktree ' .. top, 'HEAD 0', 'branch refs/heads/main', ''}
       local name = top:match('([^/]+)$')
       for i = 1, repos[top] - 1 do
@@ -144,17 +146,38 @@ end
 test('a refresh that fails queues no job, also when it fails again; the next refresh scans its own trees (sandbox)', function()
   local s = sandbox({['/r/a'] = 4, ['/r/b'] = 4}, {'/r/a', '/r/b'})
   for i = 1, 3 do
-    -- The second repository fails, after the trees of the first one are listed.
-    s.fake.lists, s.fake.fail_list = 0, 2
+    -- The second git worktree list does not start, after the trees of the first repository are
+    -- listed. Only a Git listing error gives an unavailable row (repos.lua): this one fails the
+    -- refresh.
+    s.fake.lists, s.fake.no_start_list = 0, 2
     local reply = s:perform('worktree.list', {}, s.agent)
-    expect(reply.error and reply.error.code).to_be('git_error')
+    expect(reply.error and reply.error.code).to_be('unavailable')
     expect(queued(s), 'queued jobs after failure ' .. i).to_be(0)
   end
-  s.fake.fail_list = nil
+  s.fake.no_start_list = nil
   list(s)
   expect(queued(s)).to_be(8)
   drain(s)
   expect(#s.fake.started).to_be(8)
+end)
+
+test('a Git listing error gives one unavailable row; the other repository is scanned (sandbox)', function()
+  local s = sandbox({['/r/a'] = 4, ['/r/b'] = 4}, {'/r/a', '/r/b'})
+  s.fake.lists, s.fake.fail_list = 0, 2
+  expect(list(s).refreshing).to_be(true)
+  expect(queued(s), 'the jobs of the listed repository').to_be(4)
+  drain(s)
+  local r = list(s, {worktrees_after = '/'})
+  local unavailable = 0
+  for _, t in ipairs(r.worktrees) do
+    if t.state == 'unavailable' then
+      unavailable = unavailable + 1
+      expect(t.error).to_match('not a git repository')
+      expect(t.path == '/r/a' or t.path == '/r/b').to_be(true)
+    else expect(t.state).to_be('clean') end
+  end
+  expect(unavailable).to_be(1)
+  expect(#r.worktrees).to_be(5)
 end)
 
 test('a stale restart queues a new scan; it keeps the limits and ends (sandbox)', function()
