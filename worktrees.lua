@@ -94,8 +94,8 @@ local function catalog()
   local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
   if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing worktree catalog') end
   local state = r.value or {repos = {}, pending = {}}
-  -- An older version kept owners (the agent that created a tree). No rule uses them (the user's
-  -- decision, LazyRex decisions.md): an agent may remove any tree. The next save drops them.
+  -- An older version kept owners (the agent that created a tree). No rule uses them (decision
+  -- "Agents may act on anything", 2026-10-19): an agent may remove any tree. The next save drops them.
   state.owners = nil
   return state, r.rev
 end
@@ -404,7 +404,7 @@ local function discard(id)
   return finish(id, op, {status = 'discarded', discarded = true, path = op.path})
 end
 -- worktree.discard and the panel's Discard button. The target is selected by exactly one of:
--- - id: a full operation ID, any pending operation (the user's decision, LazyRex decisions.md:
+-- - id: a full operation ID, any pending operation (decision "Agents may act on anything", 2026-10-19:
 --   an agent may discard what the user can). The panel uses id.
 -- - operation: an operation key of the caller, resolved through its aliases (its own operations).
 -- The request key reserves its target before the target changes: a record
