@@ -202,8 +202,24 @@ local function result_of(saved, fingerprint)
   if saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
   return saved.result
 end
+-- tail keeps the end of an error text within 4096 bytes of encoded JSON (the quotes, the marker
+-- and every escape included), from a UTF-8 character boundary. A Git hook can print much more
+-- (300 KB), and the operation record must fit one control message (64 KiB) with the catalog.
+local error_bytes = 4096
+local function tail(value)
+  if type(value) ~= 'string' or #rex.json.encode(value) <= error_bytes then return value end
+  -- The smallest start whose suffix fits: a later start never makes the suffix longer.
+  local lo, hi = 1, #value
+  while lo < hi do
+    local mid = math.floor((lo + hi) / 2)
+    if #rex.json.encode('…' .. value:sub(mid)) <= error_bytes then hi = mid else lo = mid + 1 end
+  end
+  while lo <= #value and value:byte(lo) >= 0x80 and value:byte(lo) < 0xC0 do lo = lo + 1 end
+  return '…' .. value:sub(lo)
+end
 local function finish(id, op, result)
   local state, rev = catalog()
+  if result.error then result.error.message = tail(result.error.message) end
   op.phase = 'cleanup'
   state.pending[id] = op
   save(state, rev, {key = id, fingerprint = op.fingerprint, result = result})

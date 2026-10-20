@@ -11,6 +11,12 @@ clean or dirty states of a large repository arrive later (101 trees: 13 ticks or
 A refresh still lists the trees of each repository and matches the workers in the request queue
 (observed on Rex 0.0.1792158932-g88fd41: 101 trees and 16 workers, 0.14 to 0.16 s).
 
+## Git hooks
+
+Git runs the repository's hooks for each create and remove. A hook that fails makes the operation
+fail with `git_error`, but Git does not undo its own work: after a failed `post-checkout` hook, the
+worktree exists. The error keeps the end of the Git output, at most 4096 bytes of JSON.
+
 ## Install
 
 Check this repository out next to LazyRex, and add the plugin to the hub config:
