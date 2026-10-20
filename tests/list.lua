@@ -143,21 +143,16 @@ test('a tree with too many workers is compact: workers_count, and hub.workers li
   local dir = tree.path .. '/' .. q .. '/' .. q .. '/' .. q .. '/' .. q
   W.run({'mkdir', '-p', dir})
   local spawned = {}
-  -- Each spawn makes a hub.changed for the plugin; a burst can fill its request queue (16), so
-  -- the spawns are spaced and a busy reply while waiting is retried.
+  -- The spawns come in a burst with no delay, after the earlier tests left about 95 trees: a
+  -- notification only arms the refresh tick, and the timer runs the tree checks within its limits
+  -- (burst.lua, scans.lua). A busy reply fails the test.
   for i = 1, 16 do
     spawned[i] = alice:hub('hub.spawn', {profile = 'sleep', key = 'busy-' .. i, cwd = dir}).spawn_id
-    rex.sleep(0.3)
   end
   -- The full entry does not fit after the main tree, so the page ends there; on the next (empty)
-  -- page it does not fit either, so it is compact. A busy reply while waiting is retried.
+  -- page it does not fit either, so it is compact.
   local entry = wait('the compact entry', function()
-    local ok, seen = pcall(pages, busy)
-    if not ok then
-      if tostring(seen.message or seen):find('is busy', 1, true) then return nil end
-      error(seen, 0)
-    end
-    local e = seen[tree.path]
+    local e = pages(busy)[tree.path]
     -- The finished scan: dirty is known only after git status.
     return e and e.compact and e.state ~= 'checking' and e
   end, 60)
@@ -169,14 +164,9 @@ test('a tree with too many workers is compact: workers_count, and hub.workers li
   local listed = 0
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == dir then listed = listed + 1 end end
   expect(listed).to_be(16)
-  for _, id in ipairs(spawned) do alice:hub('hub.stop', {spawn_id = id}); rex.sleep(0.3) end
-  -- The stops make a burst of hub.changed too: wait until the plugin answers again.
-  wait('the plugin answers', function()
-    local ok, err = pcall(function() return alice:call('worktree.list', {repo = busy}) end)
-    if ok then return true end
-    if tostring(err.message or err):find('is busy', 1, true) then return nil end
-    error(err, 0)
-  end, 60)
+  -- The stops are a burst of hub.changed too. The plugin answers at once after them.
+  for _, id in ipairs(spawned) do alice:hub('hub.stop', {spawn_id = id}) end
+  alice:call('worktree.list', {repo = busy})
 end)
 
 test('a long error is cut within 1024 bytes at a UTF-8 boundary', function()
