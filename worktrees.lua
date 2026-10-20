@@ -80,10 +80,13 @@ end
 local function find_tree(common, path)
   for _, tree in ipairs(trees(common)) do if tree.path == path then return tree end end
 end
-local function status(path, ignored)
-  local args = {'git', '-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'}
-  if ignored then args[#args + 1] = '--ignored' end
-  return checked(args) ~= ''
+-- The plugin runs git status in the background, so it never writes the index: a plain git status
+-- writes a refreshed index under index.lock, and a git commit of the user in that tree then fails
+-- (Git: git-status, "Background refresh").
+local function status_command(path, ignored)
+  local argv = {'git', '--no-optional-locks', '-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'}
+  if ignored then argv[#argv + 1] = '--ignored' end
+  return argv
 end
 local function identity(path)
   local dir = real(line(checked({'git', '-C', path, 'rev-parse', '--absolute-git-dir'})))
@@ -243,9 +246,7 @@ end
 local checks = {}
 local function check_status(id, path, ignored)
   if not checks[id] then
-    local command = {'git', '-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'}
-    if ignored then command[#command + 1] = '--ignored' end
-    local handle, err = rex.exec.start(command, {env = git_env, timeout = 30, detach = true})
+    local handle, err = rex.exec.start(status_command(path, ignored), {env = git_env, timeout = 30, detach = true})
     if not handle then fail('unavailable', tostring(err)) end
     checks[id] = handle
     return nil
@@ -484,8 +485,7 @@ local function refresh(repo_arg)
       if tree.bare then item.state = 'bare'
       elseif not exists(tree.path) then item.state = 'missing'
       else
-        local handle, err = rex.exec.start({'git', '-C', tree.path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'},
-          {env = git_env, timeout = 30, detach = true})
+        local handle, err = rex.exec.start(status_command(tree.path, false), {env = git_env, timeout = 30, detach = true})
         item.state = handle and 'checking' or 'unavailable'
         if handle then result.handles[#result.handles + 1] = {handle = handle, item = item}
         else item.error = tostring(err) end
@@ -682,8 +682,7 @@ local function remove_advice(path)
         cached.result = {ok = false, reasons = reasons}
         return
       end
-      local handle, start_err = rex.exec.start({'git', '-C', canonical, 'status', '--porcelain=v1', '-z',
-        '--untracked-files=all', '--ignore-submodules=none', '--ignored'}, {env = git_env, timeout = 30, detach = true})
+      local handle, start_err = rex.exec.start(status_command(canonical, true), {env = git_env, timeout = 30, detach = true})
       if not handle then fail('unavailable', tostring(start_err)) end
       cached.handle = handle
       arm_scans()
