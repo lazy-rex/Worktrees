@@ -177,7 +177,7 @@ test('view: New Worktree creates the tree and opens one shell; the agent sequenc
   form:render()
   local op = form:action('new_worktree', 'submit', {values = {repo = repo, branch = 'open/form', base = ''}}, 'view-create')
   expect(op.status).to_be('succeeded')
-  local path = W.root .. '/open/open/form'
+  local path = W.tree_path(repo, 'open/form')
   expect(workers_in(path)).to_be(1)
   -- The shell after New Worktree keeps the key of older versions: worktree-open/created/<key>.
   expect(W.intent('user', 'worktree-open/created/view-create').request.cwd).to_be(path)

@@ -77,6 +77,14 @@ local function repo_info(path)
   if not list[1] then fail('invalid_input', 'The repository has no worktrees') end
   return {repo = real(list[1].path), common = common, top = real(top)}
 end
+-- repo_id is 6 hex digits from the common Git directory path: h = (h * 257 + byte) mod 4294967291,
+-- from h = 0. The values stay below 2^53, so Lua 5.1 numbers are exact. An ID collision cannot
+-- reuse a wrong tree: same_tree checks the repository and the branch.
+local function repo_id(common)
+  local h = 0
+  for i = 1, #common do h = (h * 257 + common:byte(i)) % 4294967291 end
+  return string.format('%06x', h % 16777216)
+end
 local function find_tree(common, path)
   for _, tree in ipairs(trees(common)) do if tree.path == path then return tree end end
 end
@@ -284,13 +292,23 @@ local function create(caller, id, fingerprint, args, pending)
     end
     local name = info.repo:match('([^/]+)$')
     if not name then fail('invalid_input', 'The repository needs a directory name') end
-    local path = root .. '/' .. name .. '/' .. branch
+    -- A linked tree of the branch inside the root is the requested tree, also at an older path
+    -- layout. The main tree is never one (decision "New worktree paths carry a short repository ID").
+    local listed
+    for i, tree in ipairs(trees(info.common)) do
+      if i > 1 and not tree.bare and tree.branch == branch and within(tree.path, root) then listed = tree.path end
+    end
+    local path = listed or (root .. '/' .. name .. '-' .. repo_id(info.common) .. '/' .. branch)
     local branch_exists = git(info.common, {'show-ref', '--verify', '--quiet', 'refs/heads/' .. branch}).ok
     local base = branch_exists and ('refs/heads/' .. branch) or (args.base or 'HEAD')
     -- HEAD belongs to the selected worktree, not to the common Git directory's main tree.
     local commit = line(checked({'git', '-C', info.top, 'rev-parse', '--verify', '--end-of-options', base .. '^{commit}'}))
     op = {kind = 'create', fingerprint = fingerprint, repo = info.repo, common = info.common, actor = caller.agent,
       path = path, branch = branch, commit = commit, created = not exists(path), phase = 'prepared'}
+    if listed and not same_tree(op) then
+      fail('refused', 'Git lists a worktree of branch ' .. branch .. ' at ' .. listed .. ', but the directory is missing. ' ..
+        'If the tree moved, run git worktree repair. If it is gone, run git worktree prune (a locked entry needs git worktree unlock first). Then retry.')
+    end
     if not op.created then same_tree(op) end
     admit(id, op)
   end
@@ -1161,7 +1179,7 @@ local function render_new(context)
       {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
       {id = 'base', label = 'Base (optional, for a new branch)', kind = 'text', value = ''}},
       submit_action = {name = 'submit', label = 'Create worktree', enabled = true, tool = 'worktree.create'}},
-    {id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>/<branch>.'},
+    {id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>-<id>/<branch>. The ID is 6 hex digits from the Git directory path. An existing tree of the branch in this root is used.'},
     cancel_node(),
   }}
 end
@@ -1443,7 +1461,7 @@ end
 
 local actions = {
   {name = 'worktree.create', kind = 'client', title = 'Create a worktree',
-    description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>/<branch>, or return the matching existing tree. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
+    description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>-<id>/<branch> (id: 6 hex digits from the Git directory path), or return the linked tree of the branch that already exists under that root, also at an older path. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', kind = 'client', title = 'List worktrees',
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',

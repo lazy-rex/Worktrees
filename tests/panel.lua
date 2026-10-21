@@ -100,7 +100,7 @@ test('C: New Worktree… from the panel keeps the source repository; the submit 
   expect(node(form_tree, 'new_worktree').submit_action.label).to_be('Create worktree')
   local op = form:action('new_worktree', 'submit', {values = {repo = repo, branch = 'feat-a', base = ''}}, 'c-create')
   expect(op.status).to_be('succeeded')
-  feat = W.root .. '/panel/feat-a'
+  feat = W.tree_path(repo, 'feat-a')
   expect(W.try({'test', '-d', feat}).ok).to_be(true)
   local shell = wait('one shell tab', function() local w = spawn_windows(S, 'feat-a'); return #w == 1 and w[1] end, 20)
   wait('the shell tab is active (placement.focus)', function() return sview(S).active_window_id == shell.window_id end, 20)

@@ -50,5 +50,5 @@ test('a failed hook with 300 KB of output: the error is kept within 4 KiB; a ret
   expect(again.message).to_be(message)
   expect(adds(), 'the retry starts no Git').to_be(before)
   -- The hook failure does not undo the worktree: Git created it (README, "Git hooks").
-  expect(W.try({'test', '-d', W.root .. '/hooks/loud'}).ok).to_be(true)
+  expect(W.try({'test', '-d', W.tree_path(repo, 'loud')}).ok).to_be(true)
 end)

@@ -56,6 +56,18 @@ function W.settle(fn, what, timeout)
   end
 end
 
+-- repo_id and tree_path compute a new tree path as the plugin does: <root>/<name>-<id>/<branch>,
+-- with the ID from the common Git directory path (create.lua checks a fixed test vector).
+function W.repo_id(common)
+  local h = 0
+  for i = 1, #common do h = (h * 257 + common:byte(i)) % 4294967291 end
+  return string.format('%06x', h % 16777216)
+end
+function W.tree_path(repo, branch)
+  local common = W.real(W.run({'git', '-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'}))
+  return W.root .. '/' .. repo:match('([^/]+)$') .. '-' .. W.repo_id(common) .. '/' .. branch
+end
+
 -- part and intent name records as the plugin does: part(s) = #s .. ':' .. s.
 function W.part(s) return tostring(#s) .. ':' .. s end
 function W.intent(actor, spawn_key) return store('open/' .. W.part(actor) .. W.part(spawn_key)).value end

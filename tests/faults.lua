@@ -226,7 +226,7 @@ test('view: a shell that an older version started (no open intent) replays its s
   local _, key = form:admit('action', {node_id = 'new_worktree', action = 'submit',
     input = {values = {repo = repo, branch = 'faults/old-ui', base = ''}}, revision = form.revision, operation_key = 'old-ui'})
   wait('the retries reach the gate', function() return fault_fired(lost) and fault_fired(gate) end, 30)
-  local path = W.root .. '/faults/faults/old-ui'
+  local path = W.tree_path(repo, 'faults/old-ui')
   expect(workers_in(path)).to_be(1)
   local first
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == path then first = w.spawn_id end end

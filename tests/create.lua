@@ -60,7 +60,7 @@ local first
 
 test('create returns the tree, replays its key, and finds an existing tree', function()
   first = create('first', 'feature/one')
-  expect(first).to_equal({path = W.root .. '/repo with spaces/feature/one', repo = repo, branch = 'feature/one', created = true})
+  expect(first).to_equal({path = W.tree_path(repo, 'feature/one'), repo = repo, branch = 'feature/one', created = true})
   expect(create('first', 'feature/one')).to_equal(first)
   expect(create('existing', 'feature/one').created).to_be(false)
   -- base applies only to a new branch, so a bad base does not matter for an existing tree.
@@ -141,8 +141,9 @@ end)
 test('the main repository, a relative path and a symbolic link parent are refused', function()
   expect_error(function() remove('main', repo) end, 'managed root')
   expect_error(function() remove('relative', '-bad') end, 'must be absolute')
-  W.run({'mkdir', '-p', W.root .. '/repo with spaces'})
-  W.run({'ln', '-s', lab, W.root .. '/repo with spaces/escape'})
+  local escape = W.tree_path(repo, 'escape')
+  W.run({'mkdir', '-p', (escape:match('^(.*)/[^/]*$'))})
+  W.run({'ln', '-s', lab, escape})
   expect_error(function() create('symlink-parent', 'escape/child') end, 'symbolic link')
   -- The refused create stays pending until it is discarded; then its key returns the discard.
   local id = W.part('alice') .. W.part('symlink-parent')

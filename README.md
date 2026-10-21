@@ -2,6 +2,18 @@
 
 A [LazyRex](https://github.com/lazy-rex/LazyRex) plugin. Git worktrees: list, create and remove worktrees, and start an agent or a shell in one, from palette commands and a side panel.
 
+## Tree paths
+
+A new tree goes in `<root>/<name>-<id>/<branch>`. The root is `~/.lazyrex/worktrees`. The name is the
+directory name of the repository. The ID is 6 hex digits from the path of the repository's common Git
+directory, so two repositories with the same name get different trees.
+
+Before it makes a tree, create looks for a linked tree of the branch inside the root, also at an
+older path (`<root>/<name>/<branch>`). If Git lists one, create returns it with `created = false`.
+The main tree of a repository is never returned this way. If the listed tree's directory is missing,
+create is refused: repair or prune the Git entry first. A tree of the branch outside the root is not
+returned: `git worktree add` fails with `git_error`.
+
 ## Scans
 
 The plugin checks each tree in the background: the tree exists, then `git --no-optional-locks status`.
