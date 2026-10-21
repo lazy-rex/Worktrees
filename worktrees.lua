@@ -534,7 +534,8 @@ local function refresh(repo_arg)
   if repo_arg then local info = repo_info(repo_arg); repos = {[info.common] = info.repo} end
   local workers = hub('hub.workers').workers or {}
   if not repo_arg then worker_key = workers_key(workers) end
-  local result = {worktrees = {}, root = root, refreshing = false, outstanding = 0, ui = previous and previous.ui}
+  local result = {worktrees = {}, root = root, refreshing = false, outstanding = 0, ui = previous and previous.ui,
+    rendered = previous and previous.rendered, touched = previous and previous.touched}
   -- The jobs wait here until every repository is listed: a refresh that fails queues nothing.
   local jobs = {}
   for common, repo in pairs(repos) do
@@ -570,6 +571,18 @@ local function refresh(repo_arg)
   if result.refreshing then arm_scans() end
   if not repo_arg then snapshot = result; refresh_error = nil; pcall(invalidate) end
   return result
+end
+-- Source snapshots: the panel keeps one per source repository (ui). At most 16; the global snapshot
+-- '' is outside the bound. A snapshot carries rendered (the advice_generation of its last render)
+-- and touched (sources.clock at that render, for least-recently-rendered eviction). An evicted
+-- snapshot leaves the table, so its queued jobs start nothing and its active jobs change no shown
+-- snapshot. The snapshot that an agent list pages through (requested_repo) only loses ui; the scan
+-- cleanup keeps it while it is requested. The state is in table fields.
+local sources = {limit = 16, clock = 0}
+local function evict_source(key)
+  local cached = snapshots[key]
+  if not cached then return end
+  if key == requested_repo then cached.ui = nil else snapshots[key] = nil end
 end
 -- The reply of worktree.list fits every client: one Rex control message is 64 KiB (65536 bytes),
 -- and the harness test client takes at most 48 KiB (49152 bytes). Budgets, as encoded JSON:
@@ -908,8 +921,14 @@ local function refresh_safe()
   advice_generation = advice_generation + 1
   local ok, err = pcall(refresh)
   if not ok then refresh_error = type(err) == 'table' and err.message or tostring(err); pcall(invalidate) end
-  for key, cached in pairs(snapshots) do
-    if key ~= '' and cached.ui then
+  -- A source snapshot that no panel rendered in the previous or this generation is evicted;
+  -- the others are refreshed. The keys are collected first: eviction changes the table.
+  local keys = {}
+  for key, cached in pairs(snapshots) do if key ~= '' and cached.ui then keys[#keys + 1] = key end end
+  for _, key in ipairs(keys) do
+    local cached = snapshots[key]
+    if (cached.rendered or -1) < advice_generation - 1 then evict_source(key)
+    else
       local refreshed, why = pcall(refresh, key)
       if not refreshed then cached.error = type(why) == 'table' and why.message or tostring(why); pcall(invalidate) end
     end
@@ -1089,8 +1108,23 @@ local function trees_for(source_repo)
   local rows, seen, main = {}, {}, nil
   if source_repo then
     local cached = snapshots[source_repo]
+    if not (cached and cached.ui) then
+      -- A new source: evict the least recently rendered one when the bound is reached.
+      local count, oldest = 0, nil
+      for key, other in pairs(snapshots) do
+        if key ~= '' and key ~= source_repo and other.ui then
+          count = count + 1
+          if not oldest or (other.touched or 0) < (snapshots[oldest].touched or 0) then oldest = key end
+        end
+      end
+      if count >= sources.limit then evict_source(oldest) end
+    end
     if not cached then local ok, r = pcall(refresh, source_repo); cached = ok and r or nil end
-    if cached then cached.ui = true end -- keep the scan for the panel; a scan end invalidates it
+    if cached then
+      -- Keep the scan for the panel; a scan end invalidates it.
+      sources.clock = sources.clock + 1
+      cached.ui, cached.rendered, cached.touched = true, advice_generation, sources.clock
+    end
     for _, tree in ipairs(cached and cached.worktrees or {}) do rows[#rows + 1] = tree; seen[tree.path] = true; main = main or tree.repo end
   end
   for _, tree in ipairs(snapshot.worktrees) do
