@@ -46,8 +46,14 @@ end)
 
 test('the repository returns: the next refresh lists its trees again', function()
   W.run({'mv', gone .. '.away', gone})
-  local by_path = rows()
-  expect(by_path[gone] and by_path[gone].state).to_be('clean')
+  -- A list can return the finished scan from before the move (a retry reads the scan that a
+  -- previous call or the panel started), so wait for a scan with the restored rows. An RPC
+  -- failure stops the wait.
+  local by_path = wait('the restored rows', function()
+    local r = rows()
+    return r[gone] and r[gone].state ~= 'unavailable' and r
+  end, 30)
+  expect(by_path[gone].state).to_be('clean')
   expect(by_path[lost] and by_path[lost].state).to_be('clean')
   expect(by_path[kept] and by_path[kept].state).to_be('clean')
 end)
