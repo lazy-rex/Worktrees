@@ -11,9 +11,10 @@
 -- a process start (rex.exec.start). s.catalog is the value of the catalog record.
 -- s.loaded and s.load_error report the load; s:perform answers the plugin's client.reply.
 -- s.on_hub[action] = fn runs fn when the plugin calls that hub action. s.hub_answers[action] = fn(args) gives the result of that hub action. s.calls[action] counts the hub actions; s.timers holds the rex.after callbacks not yet run.
+-- s.rex_answers[method] = fn(args) gives the result of a Rex call (not client.perform).
 -- s.order lists the hub actions in call order. s.pcalls counts the pcall calls of the plugin (s.load_pcalls: during the load).
 return function(plugin_dir, base)
-  local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, on_hub = {}, hub_answers = {},
+  local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, on_hub = {}, hub_answers = {}, rex_answers = {},
     agent = {principal = {kind = 'peer', pid = 4242}}}
   local function exec(argv)
     if s.exec_hook then
@@ -47,6 +48,7 @@ return function(plugin_dir, base)
         return {result = {}}
       end
       if method == 'client.reply' then s.reply = args end
+      if s.rex_answers[method] then return s.rex_answers[method](args) end
       return {}
     end,
   }

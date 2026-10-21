@@ -812,6 +812,28 @@ local function forget(caller, args, shown)
   end
   fail('conflict', 'The worktree catalog changed; retry with the same key')
 end
+-- source_top gives the repository top of a pane directory, or nil outside a repository. Each panel
+-- render asks for it, and repo_info runs Git (observed on Rex 0.0.1792158932-g88fd41, lab: a source
+-- pane added about 100 ms and 3 Git processes to each render). So the result is kept per exact
+-- directory until refresh_safe starts a new advice_generation. Outside a repository is kept only
+-- when Git says so; any other failure is not kept. At most 64 directories: a new one past that
+-- clears the table. The state is in table fields, not in upvalues that a closure writes.
+local source_tops = {generation = -1, count = 0, by_pwd = {}}
+local function source_top(pwd)
+  if source_tops.generation ~= advice_generation then
+    source_tops.generation, source_tops.count, source_tops.by_pwd = advice_generation, 0, {}
+  end
+  local kept = source_tops.by_pwd[pwd]
+  if kept then return kept.top or nil end
+  local ok, info = pcall(repo_info, pwd)
+  local outside = not ok and type(info) == 'table' and info.code == 'git_error'
+    and type(info.message) == 'string' and info.message:find('not a git repository', 1, true) ~= nil
+  if not ok and not outside then error(info, 0) end
+  if source_tops.count >= 64 then source_tops.count, source_tops.by_pwd = 0, {} end
+  source_tops.by_pwd[pwd] = {top = ok and info.top or false}
+  source_tops.count = source_tops.count + 1
+  return ok and info.top or nil
+end
 local function repo_default(context)
   if type(context) ~= 'table' or type(context.source_block_id) ~= 'string'
     or context.source_block_id == '' or type(context.session_id) ~= 'string' or context.session_id == '' then return nil end
@@ -835,7 +857,7 @@ local function repo_default(context)
       pwd = pwd:gsub('%%(%x%x)', function(hex) return string.char(tonumber(hex, 16)) end)
     end
     if pwd:sub(1, 1) ~= '/' or pwd:find('%z') then return nil end
-    return repo_info(pwd).top
+    return source_top(pwd)
   end)
   if ok then return repo end
   return nil
