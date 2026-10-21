@@ -47,12 +47,21 @@ end)
 test('the repository returns: the next refresh lists its trees again', function()
   W.run({'mv', gone .. '.away', gone})
   -- A list can return the finished scan from before the move (a retry reads the scan that a
-  -- previous call or the panel started), so wait for a scan with the restored rows. An RPC
-  -- failure stops the wait.
-  local by_path = wait('the restored rows', function()
-    local r = rows()
-    return r[gone] and r[gone].state ~= 'unavailable' and r
-  end, 30)
+  -- previous call or the panel started), so poll for a finished scan with the restored rows.
+  -- A bounded loop, not wait(): wait() catches an error and polls again. Here any error of a
+  -- call ends the test.
+  local by_path
+  local deadline = os.time() + 30
+  repeat
+    local r = alice:call('worktree.list', {})
+    local got = {}
+    for _, t in ipairs(r.worktrees or {}) do got[t.path] = t end
+    if not r.refreshing and got[gone] and got[gone].state ~= 'unavailable' then by_path = got
+    else
+      assert_true(os.time() < deadline, 'the restored rows within 30 s')
+      rex.sleep(0.2)
+    end
+  until by_path
   expect(by_path[gone].state).to_be('clean')
   expect(by_path[lost] and by_path[lost].state).to_be('clean')
   expect(by_path[kept] and by_path[kept].state).to_be('clean')
