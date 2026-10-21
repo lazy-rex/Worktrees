@@ -6,7 +6,8 @@ A [LazyRex](https://github.com/lazy-rex/LazyRex) plugin. Git worktrees: list, cr
 
 A new tree goes in `<root>/<name>-<id>/<branch>`. The root is `~/.lazyrex/worktrees`. The name is the
 directory name of the repository. The ID is 6 hex digits from the path of the repository's common Git
-directory, so two repositories with the same name get different trees.
+directory, so two repositories with the same name usually get different trees. Two paths can still
+get the same ID. Then create does not reuse the other repository's tree: it fails with `conflict`.
 
 Before it makes a tree, create looks for a linked tree of the branch inside the root, also at an
 older path (`<root>/<name>/<branch>`). If Git lists one, create returns it with `created = false`.
