@@ -11,8 +11,9 @@
 -- a process start (rex.exec.start). s.catalog is the value of the catalog record.
 -- s.loaded and s.load_error report the load; s:perform answers the plugin's client.reply.
 -- s.on_hub[action] = fn runs fn when the plugin calls that hub action. s.hub_answers[action] = fn(args) gives the result of that hub action. s.calls[action] counts the hub actions; s.timers holds the rex.after callbacks not yet run.
+-- s.order lists the hub actions in call order. s.pcalls counts the pcall calls of the plugin (s.load_pcalls: during the load).
 return function(plugin_dir, base)
-  local s = {handlers = {}, hub_errors = {}, calls = {}, timers = {}, workers = {}, on_hub = {}, hub_answers = {},
+  local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, on_hub = {}, hub_answers = {},
     agent = {principal = {kind = 'peer', pid = 4242}}}
   local function exec(argv)
     if s.exec_hook then
@@ -36,6 +37,7 @@ return function(plugin_dir, base)
     call = function(method, args)
       if method == 'client.perform' then
         s.calls[args.action] = (s.calls[args.action] or 0) + 1
+        s.order[#s.order + 1] = args.action
         if s.on_hub[args.action] then s.on_hub[args.action]() end
         if s.hub_errors[args.action] then return nil, s.hub_errors[args.action] end
         if s.hub_answers[args.action] then return {result = s.hub_answers[args.action](args.args)} end
@@ -48,10 +50,11 @@ return function(plugin_dir, base)
       return {}
     end,
   }
-  local env = setmetatable({rex = stub}, {__index = base})
+  local env = setmetatable({rex = stub, pcall = function(...) s.pcalls = s.pcalls + 1; return pcall(...) end}, {__index = base})
   local chunk = assert(loadfile(plugin_dir .. '/worktrees.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)
+  s.load_pcalls = s.pcalls
   function s:perform(action, args, requester)
     self.reply = nil
     self.handlers.client_perform_requested({}, {requester = requester or {client_id = 'hub'}, action = action, call_id = 'c', args = args})

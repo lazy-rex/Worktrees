@@ -1501,13 +1501,26 @@ hub('hub.register', {plugin = 'worktrees', instance_id = instance_id, exports = 
 -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel.
 hub('hub.ui.tabs', {tabs = {}})
 rex_ok('session.attach', {session_id = plugin_session, event_scope = 'session'})
--- A completed operation can leave an unlock pending after a lost hub reply.
-local startup = catalog()
-for id, op in pairs(startup.pending) do if op.phase == 'cleanup' then pcall(cleanup_done, id) end end
-refresh_safe()
+-- The startup work runs after the main chunk, so the main chunk runs no pcall: on Rex
+-- 0.0.1792158932-g88fd41, a catch in the main chunk splits module-level locals between the closures
+-- made before and after it (hub docs/rex-protocol.md, "Rex Lua runtime"). start() either completes
+-- or raises the catalog error and stays incomplete; the next action calls it again. A completed
+-- operation can leave an unlock pending after a lost hub reply: each cleanup has its own catch, and
+-- a failed one stays in phase cleanup (a same-key replay, a discard or the next start ends it).
+-- The state is a table field, not an upvalue that a closure writes.
+local startup = {complete = false}
+local function start()
+  if startup.complete then return end
+  local state = catalog()
+  for id, op in pairs(state.pending) do if op.phase == 'cleanup' then pcall(cleanup_done, id) end end
+  startup.complete = true
+  refresh_safe()
+end
 rex.on('client_perform_requested', function(ctx, ev)
   local call_id = ev.call_id
   local ok, result = pcall(function()
+    -- Startup comes first: a failed startup catalog read fails the action, and nothing dispatches.
+    start()
     -- on_behalf (hub.spawn): the hub accepts the requester PID only while this forward is in flight.
     local forwarded_pid
     if ev.action == 'hub.forward' then
@@ -1552,3 +1565,5 @@ rex.on('client_perform_requested', function(ctx, ev)
     error = not ok and (type(result) == 'table' and result or {code = 'internal', message = tostring(result)}) or nil})
 end)
 rex.call('client.set_label', {label = 'lazyrex-plugin:worktrees'})
+-- The first start: after every closure and the handler exist. Its error waits for the next action.
+rex.after(0, function() pcall(start) end)
