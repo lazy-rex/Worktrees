@@ -1137,7 +1137,12 @@ local function render_panel(context)
     {id = 'worktrees', type = 'list', label = 'Worktrees', items = items},
     {id = 'refresh', type = 'widget', text = 'Managed root: ' .. root, action = {name = 'refresh', label = 'Refresh', enabled = true, tool = 'worktree.list'}},
   }
-  for id, op in pairs(state.pending) do
+  -- Operation ID order: the catalog arrives as JSON at each render, and its table order is not stable.
+  local ids = {}
+  for id in pairs(state.pending) do ids[#ids + 1] = id end
+  table.sort(ids)
+  for _, id in ipairs(ids) do
+    local op = state.pending[id]
     nodes[#nodes + 1] = {id = 'pending/' .. id, type = 'widget', text = op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.',
       action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}}
   end
