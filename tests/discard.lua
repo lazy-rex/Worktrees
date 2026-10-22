@@ -305,7 +305,7 @@ test('list: pages without changes; no duplicate or skipped id; a deleted cursor 
   local want = {}
   for i = 1, 120 do
     local key = string.format('page-%03d', i)
-    state.pending[id_of('alice', key)] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/' .. key, branch = key, repo = repo, common = common, actor = 'alice', fingerprint = 'synthetic/' .. key}
+    state.pending[id_of('alice', key)] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/' .. key, branch = key, repo = repo, common = common, actor = 'alice', fingerprint = 'synthetic/' .. key, created_at = '2026-10-21T00:00:00Z'}
     want[id_of('alice', key)] = true
   end
   W.set_catalog(state)
@@ -331,13 +331,14 @@ test('list: the byte cap holds with long escaped text', function()
   local long = string.rep('"\\\t', 400)
   for i = 1, 15 do
     local key = string.format('long-%02d', i)
-    state.pending[id_of('alice', key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. long .. i, branch = 'long', repo = repo, common = common, actor = 'alice'}
+    state.pending[id_of('alice', key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. long .. i, branch = 'long', repo = repo, common = common, actor = 'alice', created_at = '2026-10-21T00:00:00Z'}
   end
   W.set_catalog(state)
   local seen, order, pages = all_pages(alice)
   expect(#order).to_be(15)
   expect(pages).to_be(2)
   expect(seen[id_of('alice', 'long-01')].path).to_be(W.root .. '/' .. long .. '1')
+  expect(seen[id_of('alice', 'long-01')].created_at).to_be('2026-10-21T00:00:00Z')
   clear_pending()
 end)
 
