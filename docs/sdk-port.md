@@ -1,7 +1,9 @@
 # Port to the Plugin SDK (plan)
 
 Status: **proposed**, 2026-10-22. The SDK is hub draft 3 (`origin/hub/sql-contract`: docs/plugin-sdk.md
-and docs/sql.md). Nothing in it is implemented yet. The port starts when the to-do lab passes.
+and docs/sql.md). Nothing in it is implemented yet. No date gates the port (coordinator, 2026-10-22): the port starts when
+the first SDK Lua commit runs against the fake hub.sql, and moves to the real hub branch when it
+lands. What the SDK does not cover yet uses the raw escape (`app.hub`, raw dispatch), and shrinks later.
 
 Base: Worktrees main 0008d43 plus the panel pages (E1, in review). `worktrees.lua` has 1716 lines
 (990aec9: about 1800). Tests: 26 files, about 3900 lines.
@@ -26,8 +28,10 @@ Estimate: 350 to 450 lines go, before the cleanup of section 4.
 
 - Git: `trees`, `repo_info`, `same_tree`, `identity`, the tree path and its repository ID.
 - The operation phases of create and remove: prepared, sending (a Rex block runs Git), cleanup. A Git
-  mutation and a Rex block are external effects. They cannot be in one SQL transaction, so each
-  phase change commits on its own (`{tx = false}`, or one short handler transaction per phase).
+  mutation and a Rex block are external effects; they cannot be in an SQL transaction. Rules: each
+  phase commits before its external effect starts; the result and the cleanup phase commit together.
+  `{tx = false}` alone gives no atomicity across statements, so each such commit uses a supported SDK
+  transaction (G11) or one reviewed single statement.
 - The scan queue and its timer, the snapshots, the source cache, removal advice: memory state.
 - `hub.cwd.lock`, `hub.cwd.unlock`, `hub.cwd.check`, `hub.workers`, `hub.profiles`, `hub.spawn`,
   `hub.session.ensure`: hub services (gap G7).
@@ -48,11 +52,18 @@ CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, targ
                                            -- the discard/ and open/ records
 ```
 
-Import (once, in the start hook, when `repos` and `pending` are empty and the KV record `catalog`
-exists): copy `catalog.repos` and `catalog.pending`; copy each saved op whose key a pending or
-reservation names; copy the `discard/` and `open/` records. Saved ops that nothing names cannot be
-found: the KV store has no key listing (gap G8). The import leaves the KV records in place, so a
-rollback to the old plugin still works.
+Import (once, in the start hook): one transaction copies `catalog.repos`, `catalog.pending`, every
+saved operation result, and the `discard/` and `open/` records, and writes the row
+`meta(name = 'kv_import', done = 1)` (a table `meta (name TEXT PRIMARY KEY, done INTEGER)`). Only that
+row says that the import is complete: empty `repos` and `pending` are valid after Forget, so they never
+trigger an import. Every saved result moves, also a completed operation that no pending entry or
+reservation names; else its key could run again. The KV store has no key listing today, so G8
+must be resolved before the cutover.
+
+Rollback boundary: before the import commit, a rollback to the KV plugin is safe. After it, the SQL
+tables are the only current state: the KV records stay as a copy of the old state, and a rollback
+to the KV plugin would lose every later SQL write. The plan has no dual writes. A rollback after
+the cutover needs a reverse export, which this plan does not provide.
 
 ## 4. What I delete
 
