@@ -1,6 +1,6 @@
--- The forms on app.form (real hub). The SDK runs the fields of a form again at the submit and checks
--- a select value against its options then (unless check = false), so a field whose options change
--- between the render and the submit must not refuse the value that the form showed.
+-- The New Worktree form (real hub). Its repository options can change between the render and the
+-- submit (another caller records a repository): the submit takes the value that the form sent, and
+-- the create checks it. (On app.form with store = false the SDK refused it: SDK eb9654d.)
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 
 -- The lab starts with no recorded repository: the form shows a text field. Another caller records a

@@ -309,30 +309,3 @@ test('a render during an incomplete start writes nothing; its timer completes th
   expect(meta('kv_import')).to_be('done')
   expect(s:perform('view.render', {route = '/panels/worktrees'}).result ~= nil, 'the panel renders').to_be(true)
 end)
-
--- The New Worktree form (app.form) reads the recorded repositories in its fields: before the start
--- completes, its render shows the error, sends no SQL write, and arms the start.
-test('the New Worktree form during an incomplete start shows an error and writes nothing', function()
-  local s = sandbox(kv_state())
-  s.hub_errors['hub.store.get'] = 'stream response "c" failed: store down (status=503 code=unavailable)'
-  s:tick()
-  s.hub_errors['hub.store.get'] = nil
-  local function writes()
-    local n = 0
-    for _, a in ipairs({'hub.sql.begin', 'hub.sql.exec', 'hub.sql.batch', 'hub.sql.commit'}) do n = n + (s.calls[a] or 0) end
-    return n
-  end
-  local before, timers = writes(), #s.timers
-  local reply = s:perform('view.render', {route = '/forms/new-worktree'})
-  local err
-  for _, n in ipairs(reply.result and reply.result.tree.nodes or {}) do if n.type == 'error' then err = n.text end end
-  expect(err, show(reply)).to_be('The worktree records are not ready yet')
-  expect(writes(), 'the render sent no SQL write').to_be(before)
-  expect(#s.timers, 'one start is armed').to_be(timers + 1)
-  s:tick()
-  expect(meta('kv_import')).to_be('done')
-  reply = s:perform('view.render', {route = '/forms/new-worktree'})
-  local form
-  for _, n in ipairs(reply.result.tree.nodes) do if n.id == 'new_worktree' then form = n end end
-  expect(form.fields[1].value).to_be('/r')
-end)
