@@ -49,6 +49,10 @@ clean or dirty states of a large repository arrive later (101 trees: 13 ticks or
 A refresh still lists the trees of each repository and matches the workers in the request queue
 (observed on Rex 0.0.1792158932-g88fd41: 101 trees and 16 workers, 0.14 to 0.16 s).
 
+The tree states are Lua values, not SQL rows. So the hub's read tracking does not render the panel
+again for them: each scan job that changes a state calls `app.refresh()` when it ends.
+`tests/refresh.lua` checks that the panel then shows the new state with no other render request.
+
 ## Git hooks
 
 `git worktree add` runs the `post-checkout` hook when the checkout occurs
