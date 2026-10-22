@@ -1166,6 +1166,7 @@ local function select_action(enabled) return {name = 'select', label = 'Actionsâ
 local function tree_entry(tree, n)
   local item = {id = tree.path, label = cut(tree.branch), detail = cut(tree_detail(tree)), action = select_action(true)}
   if encoded(item) > entry_bytes then item.label, item.detail = cut(tree.branch, 64), '' end
+  if encoded(item) > entry_bytes then item.label = '' end
   if encoded(item) > entry_bytes then
     item = {id = 'oversized/' .. n, label = '(path too long)', detail = 'The path of this worktree is too long for the panel. worktree.list lists it.', action = select_action(false)}
   end
@@ -1175,6 +1176,7 @@ local function pending_entry(id, op, n)
   local discard_action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}
   local node = {id = 'pending/' .. id, type = 'widget', text = cut(op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.'), action = discard_action}
   if encoded(node) > entry_bytes then node.text = cut(op.kind .. ' (' .. op.phase .. ')', 64) end
+  if encoded(node) > entry_bytes then node.text = '' end
   if encoded(node) > entry_bytes then
     node = {id = 'pending-oversized/' .. n, type = 'widget', text = 'A stopped operation has an ID too long for the panel. ' ..
       'An agent can discard it with worktree.discard and its full operation ID; its caller can also use its operation key.'}

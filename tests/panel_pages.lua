@@ -125,6 +125,54 @@ test('the final check covers every route, with the form status: a view over 48 K
   expect(err and err.code).to_be('too_large')
 end)
 
+-- boundary finds the length L whose entry fits 8 KiB only without the optional text: make(L) gives
+-- the minimal entry and the entry with the shortest kept text.
+local function boundary(make)
+  for len = 8300, 6000, -1 do
+    local minimal, short = make(len)
+    if #rex.json.encode(minimal) <= 8192 and #rex.json.encode(short) > 8192 then return len end
+  end
+  error('no boundary length', 0)
+end
+
+test('boundary: an operation whose exact ID and action fit only with empty text keeps Discard', function()
+  local discard = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}
+  local function id_of(len) return '5:alice' .. len .. ':' .. string.rep('k', len) end
+  local len = boundary(function(n)
+    return {id = 'pending/' .. id_of(n), type = 'widget', text = '', action = discard},
+      {id = 'pending/' .. id_of(n), type = 'widget', text = 'create (prepared)', action = discard}
+  end)
+  local s = sandbox(0, {[id_of(len)] = {kind = 'create', phase = 'prepared', path = '/sandbox/worktrees/r/edge'}})
+  local found
+  for _, e in ipairs(walk(s)) do if e.id == 'pending/' .. id_of(len) then found = e end end
+  expect(found ~= nil, 'the exact pending ID').to_be(true)
+  expect(found.action and found.action.enabled, 'Discard kept').to_be(true)
+  expect(found.text).to_be('')
+end)
+
+test('boundary: a tree row whose exact path and action fit only with an empty label keeps its action', function()
+  local select = {name = 'select', label = 'Actions…', enabled = true, user_only = 'navigation'}
+  local branch = string.rep('b', 100)
+  local function path_of(len) return '/sandbox/worktrees/r/' .. string.rep('a', len) end
+  local len = boundary(function(n)
+    return {id = path_of(n), label = '', detail = '', action = select},
+      {id = path_of(n), label = string.rep('b', 61) .. '…', detail = '', action = select}
+  end)
+  local s = sandbox(0)
+  s.exec_hook = function(argv)
+    if argv[1] == 'git' and argv[2] == '--git-dir' and argv[4] == 'worktree' and argv[5] == 'list' then
+      local fields = {'worktree /r', 'bare', '', 'worktree ' .. path_of(len), 'HEAD 0', 'branch refs/heads/' .. branch, ''}
+      return {ok = true, stdout = table.concat(fields, '\0') .. '\0', stderr = ''}
+    end
+  end
+  s:perform('view.action', {route = '/panels/worktrees', node_id = 'refresh', action = 'refresh', input = {}})
+  local found
+  for _, e in ipairs(walk(s)) do if e.id == path_of(len) then found = e end end
+  expect(found ~= nil, 'the exact path').to_be(true)
+  expect(found.action and found.action.enabled, 'select kept').to_be(true)
+  expect(found.label).to_be('')
+end)
+
 -- The lab: a real panel of 300 trees arrives; More… walks the pages; on a More page, select opens
 -- the tree menu and Discard ends a stopped operation.
 local W = load_fixture(tests_dir .. '/support/fixture.lua')
