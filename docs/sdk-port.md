@@ -83,8 +83,9 @@ sweep and the routes in `lazyrex.json` stay. Line counts before and after go in 
   must find after a long stop; a running reply (`{status = 'running'}`) must not be saved. So
   Worktrees keeps its own `ops` table and opts out (`{store = false}`). The SDK must not replay a
   saved `running` reply.
-- G5. Caller aliases: `hub.identify` gives `legacy` IDs after an identity migration; a key of a legacy
-  ID must still find its operation. `ctx` needs the aliases.
+- G5. Caller identity: `hub.identify` gives `legacy` IDs after an identity migration; a key of a legacy
+  ID must still find its operation. `ctx` needs the aliases, the caller session, and the forwarded
+  requester identity (PID) that `hub.spawn` needs for `on_behalf`.
 - G6. A start hook and timers: work after start (import, cleanup of phase cleanup), and `rex.after`
   timers (the scan timer, the notification tick) that call SQL outside a handler.
 - G7. Hub calls under the SDK: `hub.cwd.*`, `hub.workers`, `hub.profiles`, `hub.spawn` with
@@ -95,3 +96,6 @@ sweep and the routes in `lazyrex.json` stay. Line counts before and after go in 
 - G10. Long handlers: a create holds no transaction while Git runs, but its phase commits must
   happen in order across a same-key retry. `{tx = false}` per action is the proposal; confirm that
   a same-key retry of a `{tx = false}` action reaches the handler (not a saved reply).
+- G11. Phase commits (reviewer): a `{tx = false}` action that persists an intent before external work
+  needs an atomic commit of several statements (for example `app.db.tx(fn)`), or a supported
+  alternative. The import needs the same, and a restart-safe mark that it is complete.
