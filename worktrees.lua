@@ -8,6 +8,16 @@ local function text(value, name)
   return value
 end
 local function part(value) return tostring(#value) .. ':' .. value end
+-- join is table.concat for a list of any length. Rex Lua fails table.concat of more than 2559 items
+-- ("registry overflow", observed on Rex 0.0.1792158932-g88fd41; LazyRex docs/rex-protocol.md). join
+-- joins ranges of at most 1000 items, then joins those parts the same way.
+local function join(list, sep)
+  sep = sep or ''
+  if #list <= 1000 then return table.concat(list, sep) end
+  local parts = {}
+  for i = 1, #list, 1000 do parts[#parts + 1] = table.concat(list, sep, i, math.min(i + 999, #list)) end
+  return join(parts, sep)
+end
 local function hub(action, args)
   local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
   if type(response) ~= 'table' then
@@ -369,7 +379,7 @@ local function remove(caller, id, fingerprint, args, pending)
     local details = {}
     for _, worker in ipairs(lock.workers or {}) do details[#details + 1] = (worker.spawn_id or '?') .. ' · ' .. (worker.cwd or 'unknown directory') end
     for _, pane in ipairs(lock.panes or {}) do details[#details + 1] = (pane.block_id or '?') .. ' · ' .. (pane.label or '') .. ' · ' .. (pane.cwd or '') end
-    return finish(id, op, {error = {code = 'refused', message = 'A worker or terminal pane uses this worktree, or a worker has an unknown working directory.\n' .. table.concat(details, '\n')}})
+    return finish(id, op, {error = {code = 'refused', message = 'A worker or terminal pane uses this worktree, or a worker has an unknown working directory.\n' .. join(details, '\n')}})
   end
   local check = check_status(id, op.path, true)
   if not check then return {status = 'running'} end
@@ -513,7 +523,7 @@ local function workers_key(workers)
     rows[#rows + 1] = part(worker.spawn_id or '') .. part(worker.cwd or '') .. part(worker.state or '') .. part(worker.title or '')
   end
   table.sort(rows)
-  return table.concat(rows, '|')
+  return join(rows, '|')
 end
 local function invalidate() hub('hub.ui.invalidate', {}) end
 -- listed gives the trees of one recorded repository, or nil and the Git error when Git cannot list
@@ -765,7 +775,7 @@ local function forget_check(state, repo)
   end
   table.sort(unattributed)
   table.sort(keys)
-  return commons, unattributed, 'workers/' .. table.concat(keys)
+  return commons, unattributed, 'workers/' .. join(keys)
 end
 -- forget_cached drops the cached snapshots of repo, and its rows from the snapshot of all
 -- repositories. The panel of a pane in repo refreshes it again as its source (not recorded).
@@ -1148,7 +1158,7 @@ local function removable(tree) return tree.managed and tree.path ~= tree.repo an
 local function tree_detail(tree)
   local names = {}
   for _, worker in ipairs(tree.workers or {}) do names[#names + 1] = worker.title or worker.spawn_id end
-  return tree.path .. '\n' .. (tree.state or 'unknown') .. (#names > 0 and (' · Workers: ' .. table.concat(names, ', ')) or '')
+  return tree.path .. '\n' .. (tree.state or 'unknown') .. (#names > 0 and (' · Workers: ' .. join(names, ', ')) or '')
     .. (type(tree.error) == 'string' and ('\n' .. cut(tree.error)) or '')
 end
 local function cancel_node()
@@ -1343,7 +1353,7 @@ local function render_remove(context, path)
       submit_action = {name = 'submit', label = 'Remove worktree', enabled = true, tool = 'worktree.remove'}}}
   local advice = remove_advice(path)
   if not advice then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Checking the worktree…'}
-  elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. table.concat(advice.reasons or {}, '\n')} end
+  elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. join(advice.reasons or {}, '\n')} end
   nodes[#nodes + 1] = {id = 'help', type = 'widget', text = 'Removal never forces and never deletes the branch.'}
   nodes[#nodes + 1] = cancel_node()
   return {title = 'Remove ' .. tree.branch, nodes = nodes}
