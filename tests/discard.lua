@@ -8,16 +8,16 @@ local alice, bob = agent('alice'), agent('bob')
 
 -- stopped writes a pending create that never started Git (phase prepared), as a crash leaves it.
 local function stopped(actor, key, extra)
-  local state = store('catalog').value or {repos = {}, pending = {}}
+  local state = W.catalog() or {repos = {}, pending = {}}
   -- The fingerprint is a real create's, so the create key replays the discard result.
   local op = {kind = 'create', fingerprint = 'create/' .. W.part(repo) .. W.part(key) .. W.part(''), repo = repo, common = common,
     path = W.root .. '/discard/' .. key, branch = key, phase = 'prepared', actor = actor}
   for k, v in pairs(extra or {}) do op[k] = v end
   state.pending[W.part(actor) .. W.part(key)] = op
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   return W.part(actor) .. W.part(key)
 end
-local function pending(id) return ((store('catalog').value or {}).pending or {})[id] end
+local function pending(id) return ((W.catalog() or {}).pending or {})[id] end
 
 local function panel_discard(id, key)
   user:command('worktrees')
@@ -96,7 +96,7 @@ test('an interrupted discard keeps its target: another target conflicts, a retry
   local first = stopped('alice', 'cut-1')
   local second = stopped('alice', 'cut-2')
   -- The target's discard result fails to commit after the request key reserved the target.
-  with_injection({match = {op_key = first}, fail = 'lost discard result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'lost discard result'}, 1, function()
     expect_error(function() alice:call('worktree.discard', {operation = 'cut-1', key = 'cut-request'}) end, 'lost discard result')
   end)
   expect(pending(first) ~= nil).to_be(true)
@@ -110,7 +110,7 @@ end)
 test('a retry after an identity change discards the reserved target', function()
   local carol = agent('carol')
   local id = stopped('carol', 'moved')
-  with_injection({match = {op_key = id}, fail = 'lost discard result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'lost discard result'}, 1, function()
     expect_error(function() carol:call('worktree.discard', {operation = 'moved', key = 'moved-request'}) end, 'lost discard result')
   end)
   expect(carol:report({kind = 'claude', conversation_id = 'conv-discard'}).identity).to_be('claude:conv-discard')
@@ -125,12 +125,12 @@ local function awaiting_cleanup(key, discarded)
   local id = W.part('alice') .. W.part(key)
   local path = W.root .. '/discard/' .. key
   local fingerprint = 'create/' .. W.part(repo) .. W.part(key) .. W.part('')
-  local state = store('catalog').value or {repos = {}, pending = {}}
+  local state = W.catalog() or {repos = {}, pending = {}}
   state.pending[id] = {kind = 'create', phase = 'cleanup', path = path, repo = repo, common = common,
     actor = 'alice', fingerprint = fingerprint}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local result = discarded and {status = 'discarded', discarded = true, path = path} or {path = path, repo = repo, branch = key, created = true}
-  put_operation({key = id, fingerprint = fingerprint, result = result})
+  W.put_op(id, fingerprint, result)
   return id, result
 end
 
@@ -146,8 +146,8 @@ end)
 
 test('an interrupted cleanup discard completes on retry and replays', function()
   local id = awaiting_cleanup('cut-cleanup')
-  -- The reservation batch writes no catalog, so the first catalog batch is the cleanup.
-  with_injection({match = {writes = 'catalog'}, fail = 'lost cleanup'}, 1, function()
+  -- The reservation writes no pending row, so the first write of pending is the cleanup.
+  with_injection({match = {sql_commit_writes = 'pending'}, fail = 'lost cleanup'}, 1, function()
     expect_error(function() alice:call('worktree.discard', {operation = 'cut-cleanup', key = 'cut-cleanup-request'}) end, 'lost cleanup')
   end)
   expect(pending(id).phase).to_be('cleanup')
@@ -159,7 +159,7 @@ end)
 
 test('another caller can finish the cleanup first: a create replay, then the discard retry', function()
   local id = awaiting_cleanup('other-cleanup')
-  with_injection({match = {writes = 'catalog'}, fail = 'lost cleanup'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'pending'}, fail = 'lost cleanup'}, 1, function()
     expect_error(function() alice:call('worktree.discard', {operation = 'other-cleanup', key = 'other-request'}) end, 'lost cleanup')
   end)
   -- The create replay returns its saved result and finishes the cleanup (startup does the same).
@@ -170,8 +170,8 @@ end)
 
 test('a discard whose result committed but whose cleanup did not finishes the cleanup on replay', function()
   local id, result = awaiting_cleanup('discarded-cleanup', true)
-  write({{key = 'discard/' .. W.part('alice') .. W.part('done-request'),
-    value = {fingerprint = 'discard-v1/' .. W.part('key') .. W.part('discarded-cleanup'), id = id}}})
+  W.set_reservation('discard/' .. W.part('alice') .. W.part('done-request'),
+    {fingerprint = 'discard-v1/' .. W.part('key') .. W.part('discarded-cleanup'), id = id})
   expect(alice:call('worktree.discard', {operation = 'discarded-cleanup', key = 'done-request'})).to_equal(result)
   expect(pending(id)).to_be(nil)
   expect(alice:call('worktree.create', {repo = repo, branch = 'discarded-cleanup', key = 'discarded-cleanup'}).status).to_be('discarded')
@@ -181,7 +181,7 @@ end)
 -- Discard by id (the user's decision: an agent may discard any pending operation, as the user
 -- can). The request key stays the caller's own.
 local function id_of(actor, key) return W.part(actor) .. W.part(key) end
-local function record(actor, key) return store('discard/' .. W.part(actor) .. W.part(key)) end
+local function record(actor, key) return W.reservation('discard/' .. W.part(actor) .. W.part(key)) end
 
 test("tool: an agent discards another agent's operation by id; a replay returns the first result", function()
   local id = stopped('alice', 'by-id-1')
@@ -190,8 +190,8 @@ test("tool: an agent discards another agent's operation by id; a replay returns 
   expect(pending(id)).to_be(nil)
   expect(bob:call('worktree.discard', {id = id, key = 'bob-by-id-1'})).to_equal(r)
   -- The request record is bob's: alice's request keys are separate.
-  expect(record('bob', 'bob-by-id-1').value.id).to_be(id)
-  expect(record('alice', 'bob-by-id-1').rev).to_be('0')
+  expect(record('bob', 'bob-by-id-1').id).to_be(id)
+  expect(record('alice', 'bob-by-id-1')).to_be(nil)
 end)
 
 test('an id that looks like a local key names an operation ID; operation still names a key of the caller', function()
@@ -210,8 +210,8 @@ test('exactly one selector; the same request key with the other selector conflic
   expect_error(function() alice:call('worktree.discard', {key = 'sel-none'}) end, 'exactly one')
   expect_error(function() alice:call('worktree.discard', {id = id, operation = 'sel-1', key = 'sel-both'}) end, 'exactly one')
   -- A refused selector writes nothing.
-  expect(record('alice', 'sel-none').rev).to_be('0')
-  expect(record('alice', 'sel-both').rev).to_be('0')
+  expect(record('alice', 'sel-none')).to_be(nil)
+  expect(record('alice', 'sel-both')).to_be(nil)
   expect(pending(id) ~= nil).to_be(true)
   -- The same target, first by key, then by id with the same request key: the content differs.
   expect(alice:call('worktree.discard', {operation = 'sel-1', key = 'sel-req'}).discarded).to_be(true)
@@ -240,7 +240,7 @@ end)
 test('an interrupted discard by id keeps its target: another id conflicts, a retry completes it', function()
   local first = stopped('alice', 'id-cut-1')
   local second = stopped('alice', 'id-cut-2')
-  with_injection({match = {op_key = first}, fail = 'lost discard result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'lost discard result'}, 1, function()
     expect_error(function() bob:call('worktree.discard', {id = first, key = 'id-cut'}) end, 'lost discard result')
   end)
   expect(pending(first) ~= nil).to_be(true)
@@ -274,17 +274,17 @@ local function all_pages(who, args)
 end
 local function clear_pending()
   -- A file filter can run this before any test has made the catalog.
-  local state = store('catalog').value or {repos = {}}
+  local state = W.catalog() or {repos = {}}
   state.pending = {}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
 end
 
 test('list: operations shows every pending entry; a legacy entry has no actor; repo does not filter it', function()
   clear_pending()
   local mine = stopped('alice', 'list-1')
-  local state = store('catalog').value
+  local state = W.catalog()
   state.pending['legacy-id'] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/legacy', branch = 'legacy', repo = repo, common = common}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local seen = all_pages(alice, {repo = repo})
   expect(seen[mine].actor).to_be('alice')
   expect(seen[mine].kind).to_be('create')
@@ -299,20 +299,20 @@ end)
 
 test('list: pages without changes; no duplicate or skipped id; a deleted cursor id is a position', function()
   clear_pending()
-  local state = store('catalog').value
+  local state = W.catalog()
   local want = {}
   for i = 1, 120 do
     local key = string.format('page-%03d', i)
     state.pending[id_of('alice', key)] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/' .. key, branch = key, repo = repo, common = common, actor = 'alice', fingerprint = 'synthetic/' .. key}
     want[id_of('alice', key)] = true
   end
-  write({{key = 'catalog', value = state}})
-  local rev = store('catalog').rev
+  W.set_catalog(state)
+  local rev = W.records()
   local seen, order, pages = all_pages(alice)
   expect(pages).to_be(3)
   for id in pairs(want) do expect(seen[id] ~= nil, 'listed ' .. id).to_be(true) end
   expect(#order).to_be(120)
-  expect(store('catalog').rev, 'paging changes nothing').to_be(rev)
+  expect(W.records(), 'paging changes nothing').to_be(rev)
   -- A cursor whose entry was discarded still works as a position.
   local cursor = order[50]
   expect(alice:call('worktree.discard', {id = cursor, key = 'page-del'}).discarded).to_be(true)
@@ -324,14 +324,14 @@ end)
 -- One control message carries at most 64 KiB, so each test writes a catalog below that.
 test('list: the byte cap holds with long escaped text', function()
   clear_pending()
-  local state = store('catalog').value
+  local state = W.catalog()
   -- Quotes, backslashes and tabs grow when JSON escapes them: about 2.5 KB an entry here.
   local long = string.rep('"\\\t', 400)
   for i = 1, 15 do
     local key = string.format('long-%02d', i)
     state.pending[id_of('alice', key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. long .. i, branch = 'long', repo = repo, common = common, actor = 'alice'}
   end
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local seen, order, pages = all_pages(alice)
   expect(#order).to_be(15)
   expect(pages).to_be(2)
@@ -341,12 +341,12 @@ end)
 
 test('list: an entry too large for a page is compact, with its exact id; the next entry follows', function()
   clear_pending()
-  local state = store('catalog').value
+  local state = W.catalog()
   local huge = id_of('alice', 'huge')
-  state.pending[huge] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. string.rep('"', 16500), branch = 'huge', repo = repo, common = common, actor = 'alice'}
+  state.pending[huge] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. string.rep('"', 8000) .. string.rep('a', 9000), branch = 'huge', repo = repo, common = common, actor = 'alice'}
   local small = id_of('alice', 'small')
   state.pending[small] = {kind = 'remove', phase = 'prepared', path = W.root .. '/small', branch = 'small', repo = repo, common = common, actor = 'alice'}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local seen, order = all_pages(alice)
   expect(order).to_equal({huge, small})
   expect(seen[huge].compact).to_be(true)

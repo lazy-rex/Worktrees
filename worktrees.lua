@@ -1,9 +1,11 @@
 -- Worktree management. Git owns the trees. The hub owns operation records and cwd locks.
-local app = require('lazyrex').plugin('worktrees')
+local lazyrex = require('lazyrex')
+local app = lazyrex.plugin('worktrees')
 local plugin_session = assert(app.session_id, 'plugin_session is required')
 local fail, hub = app.fail, app.hub
--- Worktrees keeps its own operation records and saved results (hub.store), so no handler or event
--- uses an SDK transaction or a saved reply.
+-- Worktrees keeps its own operation records and saved results (SQL tables below), so no handler
+-- or event uses an SDK transaction or a saved reply: a create or a remove runs Git between its
+-- phase commits, and a running reply must stay out of the saved replies.
 local raw = {tx = false, store = false}
 local function text(value, name)
   if type(value) ~= 'string' or value == '' or value:find('%z') then fail('invalid_input', name .. ' must be nonempty text without NUL') end
@@ -88,15 +90,56 @@ local function identity(path)
   -- Rex runs on macOS. Birth time and inode distinguish a replacement at the same path.
   return dir .. '\n' .. checked({'stat', '-f', '%d:%i:%B', dir})
 end
-local function catalog()
-  local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
-  if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing worktree catalog') end
-  local state = r.value or {repos = {}, pending = {}}
-  -- An older version kept owners (the agent that created a tree). No rule uses them (decision
-  -- "Agents may act on anything", 2026-10-19): an agent may remove any tree. The next save drops them.
-  state.owners = nil
-  return state, r.rev
+-- The records (hub.sql, docs/sdk-port.md): the recorded repositories (Git common directory ->
+-- main tree), the pending operations (the operation record as JSON), the saved operation results,
+-- the reservations of discard and open requests (each record as JSON), and the import state.
+-- Rex runs one handler at a time, and the hub fences an old instance, so a read and the writes
+-- after it see no other writer. Each phase commit is one statement or one batch (all or nothing).
+local db, json = app.db, rex.json
+db.migrate {
+  'CREATE TABLE repos (common TEXT PRIMARY KEY, repo TEXT NOT NULL)',
+  'CREATE TABLE pending (id TEXT PRIMARY KEY, op TEXT NOT NULL)',
+  'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
+  'CREATE TABLE reservations (key TEXT PRIMARY KEY, record TEXT NOT NULL)',
+  'CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)',
+}
+-- rows reads every row of a query; a reply that the hub cut (about 1 MB) is an error.
+local function rows(sql, ...)
+  local list, more = db.query(sql, ...)
+  if more then fail('too_large', 'The worktree records are larger than one reply') end
+  return list
 end
+-- Until the import of the hub.store records ends (start), no read of the repositories and the
+-- pending operations sees a part of them: a refresh, a render or an action fails with unavailable.
+local imported = {done = false}
+local function catalog()
+  if not imported.done then fail('unavailable', 'The import of the worktree records is not complete') end
+  local state = {repos = {}, pending = {}}
+  for _, r in ipairs(rows('SELECT common, repo FROM repos')) do state.repos[r.common] = r.repo end
+  for _, r in ipairs(rows('SELECT id, op FROM pending')) do state.pending[r.id] = json.decode(r.op) end
+  return state
+end
+local function pending_op(id)
+  local r = db.first('SELECT op FROM pending WHERE id = ?', id)
+  return r and json.decode(r.op) or nil
+end
+local function put_pending(id, op) return {'INSERT OR REPLACE INTO pending (id, op) VALUES (?, ?)', id, json.encode(op)} end
+local function saved_op(key)
+  local r = db.first('SELECT fingerprint, result FROM ops WHERE key = ?', key)
+  if not r then return {found = false} end
+  return {found = true, fingerprint = r.fingerprint, result = json.decode(r.result)}
+end
+local function save_op(key, fingerprint, result)
+  return {'INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', key, fingerprint, json.encode(result)}
+end
+-- reservation gives the record of the first key of keys that has one (the keys of the caller's aliases).
+local function reservation(keys)
+  for _, key in ipairs(keys) do
+    local r = db.first('SELECT record FROM reservations WHERE key = ?', key)
+    if r then return json.decode(r.record), key end
+  end
+end
+local function put_reservation(key, record) db.exec('INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(record)) end
 -- A caller is the user (the view path) or an agent (the SDK ctx). aliases are the agent ID and its
 -- legacy IDs (ctx.aliases) after an identity migration, current first. An operation ID is part(actor)..part(key).
 local user_caller = {agent = 'user', aliases = {'user'}, user = true}
@@ -106,14 +149,6 @@ local function agent_caller(ctx)
     if type(id) == 'string' and id ~= '' and not seen[id] then aliases[#aliases + 1] = id; seen[id] = true end
   end
   return {agent = ctx.agent, aliases = aliases, session = ctx.session_id}
-end
-local function save(state, rev, op)
-  local args = {ops = {{key = 'catalog', if_rev = rev, value = state}}}
-  if op then args.op = op end
-  local result = hub('hub.store.batch', args)
-  if result.conflict then fail('conflict', 'The worktree catalog changed; retry with the same key') end
-  if not result.revs and not result.op_exists then fail('internal', 'Invalid store result') end
-  return result
 end
 local function rex_ok(method, args)
   local result, err = rex.call(method, args)
@@ -129,8 +164,7 @@ local function operation_blocks(op)
   return rex_ok('session.list_blocks', {session_id = op.session}).blocks or {}, false
 end
 local function cleanup_done(id)
-  local state, rev = catalog()
-  local op = state.pending[id]
+  local op = pending_op(id)
   if not op or op.phase ~= 'cleanup' then return end
   if op.block then
     local blocks = operation_blocks(op)
@@ -141,18 +175,16 @@ local function cleanup_done(id)
     end
   end
   if op.kind == 'remove' then hub('hub.cwd.unlock', {path = op.path, key = id}) end
-  state.pending[id] = nil
-  save(state, rev)
+  db.exec('DELETE FROM pending WHERE id = ?', id)
 end
--- Rex owns each Git mutation. Keep the block until the operation result commits.
+-- Rex owns each Git mutation. Keep the block until the operation result commits. The block label
+-- names the instance and the operation: an operation goes to phase sending once.
 local function mutation(id, op, args)
   if op.phase ~= 'sending' then
     op.phase = 'sending'
     op.session = plugin_session
-    local state, rev = catalog()
-    op.label = 'lazyrex-worktree:' .. app.instance_id .. ':' .. rev
-    state.pending[id] = op
-    save(state, rev)
+    op.label = 'lazyrex-worktree:' .. app.instance_id .. ':' .. lazyrex.fingerprint(id)
+    db.exec(unpack(put_pending(id, op)))
     local command = {'/usr/bin/env'}
     for name in pairs(git_env) do command[#command + 1] = '-u'; command[#command + 1] = name end
     command[#command + 1] = 'git'; command[#command + 1] = '--git-dir'; command[#command + 1] = op.common
@@ -161,9 +193,7 @@ local function mutation(id, op, args)
       flavor = 'com.superlogical.terminal.shell', label = op.label,
       options = {command = command, cwd = op.repo, login = false, exit = {on_completion = false}}})
     op.block = created.block_id
-    state, rev = catalog()
-    state.pending[id] = op
-    save(state, rev)
+    db.exec(unpack(put_pending(id, op)))
   end
   local blocks, gone = operation_blocks(op)
   if gone then return {missing = true} end
@@ -179,9 +209,7 @@ local function mutation(id, op, args)
       end
     end
     if not op.block then fail('unresolved', 'The Git process has an unknown start result; a late Rex reply can still create its block') end
-    local state, rev = catalog()
-    state.pending[id] = op
-    save(state, rev)
+    db.exec(unpack(put_pending(id, op)))
   end
   local process = rex_ok('com.superlogical.terminal.process', {session_id = op.session, block_id = op.block, args = {}})
   if process.child or not process.last_exit then return nil end
@@ -199,7 +227,7 @@ local function result_of(saved, fingerprint)
 end
 -- tail keeps the end of an error text within 4096 bytes of encoded JSON (the quotes, the marker
 -- and every escape included), from a UTF-8 character boundary. A Git hook can print much more
--- (300 KB), and the operation record must fit one control message (64 KiB) with the catalog.
+-- (300 KB), and the batch that saves the result and the operation record must fit one request (64 KiB).
 local error_bytes = 4096
 local function tail(value)
   if type(value) ~= 'string' or #rex.json.encode(value) <= error_bytes then return value end
@@ -212,26 +240,22 @@ local function tail(value)
   while lo <= #value and value:byte(lo) >= 0x80 and value:byte(lo) < 0xC0 do lo = lo + 1 end
   return '…' .. value:sub(lo)
 end
+-- finish saves the result and the cleanup phase together, then cleans up.
 local function finish(id, op, result)
-  local state, rev = catalog()
   if result.error then result.error.message = tail(result.error.message) end
   op.phase = 'cleanup'
-  state.pending[id] = op
-  save(state, rev, {key = id, fingerprint = op.fingerprint, result = result})
+  db.batch({put_pending(id, op), save_op(id, op.fingerprint, result)})
   cleanup_done(id)
   if result.error then fail(result.error.code, result.error.message) end
   return result
 end
 local function admit(id, op)
-  local state, rev = catalog()
-  for other, pending in pairs(state.pending) do
+  for other, pending in pairs(catalog().pending) do
     if other ~= id and (pending.path == op.path or within(pending.path, op.path) or within(op.path, pending.path)) then
       fail('conflict', 'Another operation owns this path; retry that operation first')
     end
   end
-  state.repos[op.common] = op.repo
-  state.pending[id] = op
-  save(state, rev)
+  db.batch({{'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', op.common, op.repo}, put_pending(id, op)})
 end
 local function prepare_parent(path)
   if not within(path, root) then fail('refused', 'The path is outside the worktree root') end
@@ -382,13 +406,12 @@ local function mutate(caller, kind, args)
   else fingerprint = 'remove/' .. part(text(args.path, 'path')) end
   for _, alias in ipairs(caller.aliases) do
     local id = part(alias) .. part(key)
-    local saved = hub('hub.store.op', {key = id})
+    local saved = saved_op(id)
     if saved.found then cleanup_done(id); return result_of(saved, fingerprint) end
   end
-  local state = catalog()
   local id, pending = part(caller.agent) .. part(key), nil
   for _, alias in ipairs(caller.aliases) do
-    local found = state.pending[part(alias) .. part(key)]
+    local found = pending_op(part(alias) .. part(key))
     if found then id, pending = part(alias) .. part(key), found; break end
   end
   if pending and pending.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
@@ -403,11 +426,10 @@ end
 -- - a saved result of any other kind: {status = 'complete'} (the operation ended by itself);
 -- - no pending entry and no saved result: not_found.
 local function discard(id)
-  local state = catalog()
-  local op = state.pending[id]
+  local op = pending_op(id)
   if op and op.phase == 'cleanup' then cleanup_done(id); op = nil end
   if not op then
-    local saved = hub('hub.store.op', {key = id})
+    local saved = saved_op(id)
     if not saved.found then fail('not_found', 'This operation is no longer pending') end
     if type(saved.result) == 'table' and saved.result.discarded then return saved.result end
     return {status = 'complete'}
@@ -429,7 +451,7 @@ end
 -- - id: a full operation ID, any pending operation (decision "Agents may act on anything", 2026-10-19:
 --   an agent may discard what the user can). The panel uses id.
 -- - operation: an operation key of the caller, resolved through its aliases (its own operations).
--- The request key reserves its target before the target changes: a record
+-- The request key reserves its target before the target changes: a reservation
 -- discard/<part(actor)><part(key)> = {fingerprint, id}. The request key is the caller's own. A retry
 -- with the same key discards the reserved ID again, also after an alias change; another target or
 -- the other selector with the same key conflicts, also after an interruption. discard() derives
@@ -442,34 +464,21 @@ local function discard_request(caller, selector, key)
   local fingerprint = 'discard-v1/' .. part(by_id and 'id' or 'key') .. part(target)
   local record_keys = {}
   for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'discard/' .. part(alias) .. part(key) end
-  local function reserved()
-    local records = hub('hub.store.get', {keys = record_keys}).records
-    for _, record_key in ipairs(record_keys) do
-      local r = records[record_key]
-      if r and r.value ~= nil then
-        if r.value.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
-        return r.value.id
-      end
-    end
+  local record = reservation(record_keys)
+  if record then
+    if record.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+    return discard(record.id)
   end
-  local id = reserved()
-  if not id then
-    id = target
-    if by_key then
-      local state = catalog()
-      id = nil
-      for _, alias in ipairs(caller.aliases) do
-        local candidate = part(alias) .. part(target)
-        if not id and (state.pending[candidate] or hub('hub.store.op', {key = candidate}).found) then id = candidate end
-      end
-      if not id then fail('not_found', 'You have no operation with this key') end
+  local id = target
+  if by_key then
+    id = nil
+    for _, alias in ipairs(caller.aliases) do
+      local candidate = part(alias) .. part(target)
+      if not id and (pending_op(candidate) or saved_op(candidate).found) then id = candidate end
     end
-    local saved = hub('hub.store.batch', {ops = {{key = record_keys[1], if_rev = '0', value = {fingerprint = fingerprint, id = id}}}})
-    if saved.conflict then
-      id = reserved()
-      if not id then fail('conflict', 'The discard request changed; retry with the same key') end
-    end
+    if not id then fail('not_found', 'You have no operation with this key') end
   end
+  put_reservation(record_keys[1], {fingerprint = fingerprint, id = id})
   return discard(id)
 end
 local snapshots = {}
@@ -528,7 +537,7 @@ local function refresh(repo_arg)
   for common, repo in pairs(repos) do
     local rows, err = listed(common)
     if not rows then
-      -- One row for the repository; the catalog keeps it, so a later refresh lists it again.
+      -- One row for the repository; the repos table keeps it, so a later refresh lists it again.
       result.worktrees[#result.worktrees + 1] = {path = repo, repo = repo, branch = '(unavailable)', managed = false,
         workers = {}, state = 'unavailable', error = err}
     end
@@ -694,7 +703,7 @@ local function recorded(state, repo)
   for _, value in pairs(state.repos or {}) do if value == repo then return true end end
   return false
 end
--- Forget repository removes a recorded repository from the catalog. Nothing on disk changes, and no
+-- Forget repository removes a recorded repository from the repos table. Nothing on disk changes, and no
 -- process stops: a worker in that repository keeps running, and only its row leaves the panel.
 -- Unconditional refusals: an unfinished operation in the repository; a worker with an unknown
 -- directory; a worker inside the recorded main path or inside a tree that Git lists now.
@@ -712,7 +721,7 @@ local function inside(path, paths)
   for _, p in ipairs(paths) do if path == p or within(path, p) then return true end end
   return false
 end
--- forget_check returns the catalog keys (Git common directories) of repo, the unattributed workers
+-- forget_check returns the repos keys (Git common directories) of repo, the unattributed workers
 -- as text rows, and the key of that worker set. It fails for a refusal.
 local function forget_check(state, repo)
   local commons, own, unavailable = {}, {repo}, false
@@ -769,7 +778,7 @@ local function forget_cached(repo)
   snapshot.worktrees = kept
 end
 -- forget: worktree.forget and the Forget repository form. The fingerprint is the path only, so
--- accept_unattributed does not change the operation. Only a success is saved, with the catalog
+-- accept_unattributed does not change the operation. Only a success is saved, with the repos
 -- change in one batch: a refusal or needs_confirmation keeps the key free for a later call. A
 -- same-key retry returns the saved success and changes nothing, also after a create has recorded
 -- the repository again. shown (the form only): the worker set key that the form showed; when the
@@ -781,37 +790,28 @@ local function forget(caller, args, shown)
   end
   local fingerprint = 'forget/' .. part(repo)
   for _, alias in ipairs(caller.aliases) do
-    local saved = hub('hub.store.op', {key = part(alias) .. part(key)})
+    local saved = saved_op(part(alias) .. part(key))
     if saved.found then return result_of(saved, fingerprint) end
   end
-  local id = part(caller.agent) .. part(key)
-  for _ = 1, 3 do
-    local state, rev = catalog()
-    for _, alias in ipairs(caller.aliases) do
-      if state.pending[part(alias) .. part(key)] then fail('operation_conflict', 'This key has different content') end
-    end
-    local commons, unattributed, set_key = forget_check(state, repo)
-    if shown ~= nil and shown ~= set_key then return {changed = true} end
-    if unattributed[1] and args.accept_unattributed ~= true then
-      fail('needs_confirmation', 'Git cannot list this repository, so these workers may use it. They keep running, but lose their row in the panel. To forget it, call again with accept_unattributed = true.\n' .. worker_lines(unattributed))
-    end
-    for _, common in ipairs(commons) do state.repos[common] = nil end
-    local result = {forgotten = true, repo = repo, unattributed_count = #unattributed}
-    if unattributed[1] then
-      result.unattributed_workers = {}
-      for i = 1, math.min(#unattributed, 20) do result.unattributed_workers[i] = cut(unattributed[i]) end
-    end
-    local saved = hub('hub.store.batch', {ops = {{key = 'catalog', if_rev = rev, value = state}},
-      op = {key = id, fingerprint = fingerprint, result = result}})
-    if saved.op_exists then return saved.op_exists.result end
-    if saved.conflict and saved.conflict.kind == 'operation' then fail('operation_conflict', 'This key has different content') end
-    if not saved.conflict then
-      if not saved.revs then fail('internal', 'Invalid store result') end
-      forget_cached(repo)
-      return result
-    end
+  local state = catalog()
+  for _, alias in ipairs(caller.aliases) do
+    if state.pending[part(alias) .. part(key)] then fail('operation_conflict', 'This key has different content') end
   end
-  fail('conflict', 'The worktree catalog changed; retry with the same key')
+  local commons, unattributed, set_key = forget_check(state, repo)
+  if shown ~= nil and shown ~= set_key then return {changed = true} end
+  if unattributed[1] and args.accept_unattributed ~= true then
+    fail('needs_confirmation', 'Git cannot list this repository, so these workers may use it. They keep running, but lose their row in the panel. To forget it, call again with accept_unattributed = true.\n' .. worker_lines(unattributed))
+  end
+  local result = {forgotten = true, repo = repo, unattributed_count = #unattributed}
+  if unattributed[1] then
+    result.unattributed_workers = {}
+    for i = 1, math.min(#unattributed, 20) do result.unattributed_workers[i] = cut(unattributed[i]) end
+  end
+  local statements = {save_op(part(caller.agent) .. part(key), fingerprint, result)}
+  for _, common in ipairs(commons) do statements[#statements + 1] = {'DELETE FROM repos WHERE common = ?', common} end
+  db.batch(statements)
+  forget_cached(repo)
+  return result
 end
 -- source_top gives the repository top of a pane directory, or nil outside a repository. Each panel
 -- render asks for it, and repo_info runs Git (observed on Rex 0.0.1792158932-g88fd41, lab: a source
@@ -1170,8 +1170,8 @@ local function pending_entry(id, op, n)
   return {node = node, bytes = encoded(node)}
 end
 -- panel_entries gives the source text and the entries: the tree rows (the source rows first), then
--- the stopped operations in operation ID order (the catalog arrives as JSON at each render, and its
--- table order is not stable).
+-- the stopped operations in operation ID order (the rows arrive at each render, and the order of a
+-- Lua table is not stable).
 local function panel_entries(context)
   local source = repo_default(context)
   local rows, main = trees_for(source)
@@ -1182,7 +1182,7 @@ local function panel_entries(context)
   for id in pairs(state.pending) do ids[#ids + 1] = id end
   table.sort(ids)
   for _, id in ipairs(ids) do entries[#entries + 1] = pending_entry(id, state.pending[id], #entries + 1) end
-  -- The source repository shows also when the catalog does not record it (after Forget, or before
+  -- The source repository shows also when the repos table does not record it (after Forget, or before
   -- its first create): worktree.list and the panel of other panes do not show it.
   local source_text = source and cut('Repository: ' .. source .. ((main and not recorded(state, main)) and ' (not recorded)' or ''))
   return source_text, entries
@@ -1437,27 +1437,9 @@ local function open_request(caller, req, keys, view, requester_pid, branch_title
   -- the first spawn (and refuses a key that both IDs used).
   local record_keys = {}
   for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'open/' .. part(alias) .. part(keys.spawn) end
-  local own_key, intent, rev
-  local function load()
-    local records = hub('hub.store.get', {keys = record_keys}).records
-    own_key, intent, rev = record_keys[1], nil, '0'
-    for _, key in ipairs(record_keys) do
-      local r = records[key]
-      if r and r.value ~= nil then
-        if r.value.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
-        own_key, intent, rev = key, r.value, r.rev
-        return
-      end
-    end
-  end
-  local function put(value)
-    local result = hub('hub.store.batch', {ops = {{key = own_key, if_rev = rev, value = value}}})
-    if result.conflict then load(); return false end
-    rev = result.revs and result.revs[own_key] or rev
-    intent = value
-    return true
-  end
-  load()
+  local intent, own_key = reservation(record_keys)
+  own_key = own_key or record_keys[1]
+  if intent and intent.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
   if not intent then
     local tree = find_known(path)
     if not tree or tree.state == 'missing' or tree.state == 'bare' then fail('invalid_input', 'The worktree is not available') end
@@ -1490,14 +1472,16 @@ local function open_request(caller, req, keys, view, requester_pid, branch_title
     end
     local value = {fingerprint = fingerprint, actor = caller.agent, phase = where == 'session' and 'prepared' or 'ready',
       request = request, ensure = where == 'session' and {key = keys.ensure, name = tree.branch} or nil}
-    if not put(value) and not intent then fail('conflict', 'The open intent changed; retry with the same key') end
+    put_reservation(own_key, value)
+    intent = value
   end
   if intent.phase == 'prepared' then
     -- A spawn into another session cannot select that session in the app, so it asks for no focus.
     local session = hub('hub.session.ensure', {key = intent.ensure.key, name = intent.ensure.name}).session_id
     local value = {fingerprint = intent.fingerprint, actor = intent.actor, phase = 'ready', request = intent.request, ensure = intent.ensure}
     value.request.placement = {session = session}
-    if not put(value) then fail('conflict', 'The open intent changed; retry with the same key') end
+    put_reservation(own_key, value)
+    intent = value
   end
   local spawn = {}
   for name, value in pairs(intent.request) do spawn[name] = value end
@@ -1618,17 +1602,84 @@ local actions = {
 -- The startup work runs after the main chunk and the SDK's registration (both rex.after(0), in
 -- order), so the main chunk runs no pcall: on Rex 0.0.1792158932-g88fd41, a catch in the main
 -- chunk splits module-level locals between the closures made before and after it (hub
--- docs/rex-protocol.md, "Rex Lua runtime"). start() either completes or raises the catalog error
+-- docs/rex-protocol.md, "Rex Lua runtime"). start() either completes or raises the error of its import or read
 -- and stays incomplete; each handler calls it first, so a failed startup read fails the action and
 -- nothing dispatches. A completed operation can leave an unlock pending after a lost hub reply: each
 -- cleanup has its own catch, and a failed one stays in phase cleanup (a same-key replay, a discard
 -- or the next start ends it). The state is a table field, not an upvalue that a closure writes.
+-- The import (docs/sdk-port.md, section 3) copies the records of the hub.store version once, in
+-- pages: the catalog record, the open/ and discard/ reservations, then every saved operation result
+-- (also one that no pending operation names: else its key could run again). The last batch of a
+-- page writes the progress row (the source and its cursor), so a restart goes on from there. Each
+-- copy is an INSERT OR REPLACE, so a page that commits again gives the same rows. Only the row
+-- kv_import = done ends the import: empty tables are valid after Forget. The hub.store records
+-- stay as they are.
+local import_sources = {'catalog', 'open/', 'discard/', 'ops'}
+-- A batch holds at most 48 KiB of encoded statements: one request is at most 64 KiB.
+local batch_bytes = 49152
+-- import_page gives the copy statements of one page of a source, and the cursor of the next page.
+local function import_page(source, cursor)
+  local out, after = {}, cursor ~= '' and cursor or nil
+  if source == 'catalog' then
+    local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
+    local value = r and r.value or {}
+    for common, repo in pairs(value.repos or {}) do out[#out + 1] = {'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', common, repo} end
+    for id, op in pairs(value.pending or {}) do out[#out + 1] = put_pending(id, op) end
+    return out, nil
+  end
+  if source == 'ops' then
+    local page = hub('hub.store.ops_scan', {after = after})
+    for _, op in ipairs(page.ops or {}) do
+      out[#out + 1] = {'INSERT OR REPLACE INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', op.key, op.fingerprint or '', json.encode(op.result)}
+    end
+    return out, page.next
+  end
+  local page = hub('hub.store.scan', {prefix = source, after = after})
+  local keys = {}
+  for key in pairs(page.records or {}) do keys[#keys + 1] = key end
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    out[#out + 1] = {'INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(page.records[key].value)}
+  end
+  return out, page.next
+end
+-- import_commit commits statements in batches; the last batch also has the rows of last.
+local function import_commit(statements, last)
+  local batch, size = {}, 0
+  for _, s in ipairs(statements) do
+    local n = #json.encode(s)
+    if #batch > 0 and size + n > batch_bytes then db.batch(batch); batch, size = {}, 0 end
+    batch[#batch + 1] = s
+    size = size + n
+  end
+  for _, s in ipairs(last) do batch[#batch + 1] = s end
+  db.batch(batch)
+end
+local function import()
+  if db.first("SELECT value FROM meta WHERE name = 'kv_import'") then imported.done = true; return end
+  local progress = db.first("SELECT value FROM meta WHERE name = 'kv_import_progress'")
+  local source, cursor = 1, ''
+  if progress then
+    local n, c = progress.value:match('^(%d+):(.*)$')
+    source, cursor = tonumber(n), c
+  end
+  while source <= #import_sources do
+    local statements, next_cursor = import_page(import_sources[source], cursor)
+    if next_cursor then cursor = next_cursor else source, cursor = source + 1, '' end
+    local last = {{'INSERT OR REPLACE INTO meta (name, value) VALUES (?, ?)', 'kv_import_progress', source .. ':' .. cursor}}
+    if source > #import_sources then last[2] = {"INSERT INTO meta (name, value) VALUES ('kv_import', 'done')"} end
+    import_commit(statements, last)
+  end
+  imported.done = true
+end
+
 local startup = {complete = false, tabs = false}
 local function start()
   if startup.complete then return end
   -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel. The hub
   -- accepts hub.ui.tabs only from a registered instance, so it waits for the SDK's registration.
   if not startup.tabs then hub('hub.ui.tabs', {tabs = {}}); startup.tabs = true end
+  import()
   local state = catalog()
   for id, op in pairs(state.pending) do if op.phase == 'cleanup' then pcall(cleanup_done, id) end end
   startup.complete = true

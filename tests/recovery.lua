@@ -10,7 +10,7 @@ local alice = agent('alice')
 write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
 
 local function id(key) return W.part('alice') .. W.part(key) end
-local function pending(key) return ((store('catalog').value or {}).pending or {})[id(key)] end
+local function pending(key) return ((W.catalog() or {}).pending or {})[id(key)] end
 -- worktrees_with counts the worktrees of a branch (git worktree list --porcelain).
 local function worktrees_with(branch)
   local text, n, pos = W.git(repo, 'worktree', 'list', '--porcelain') .. '\n', 0, 1
@@ -44,7 +44,7 @@ end)
 
 test('create: Git finished, the result did not commit; the retry after the block is gone creates one tree', function()
   local args = {key = 'recover-create', repo = repo, branch = 'recovery/create'}
-  with_injection({match = {op_key = id('recover-create')}, fail = 'crash before the result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'crash before the result'}, 1, function()
     expect_error(function() settle(function() return alice:call('worktree.create', args) end) end, 'crash before the result')
   end)
   -- The state a crash leaves: the operation is pending in phase sending, with its Git block.
@@ -62,7 +62,7 @@ end)
 test('remove: Git finished, the result did not commit; the lock stays until the retry', function()
   local made = settle(function() return alice:call('worktree.create', {key = 'to-remove', repo = repo, branch = 'recovery/remove'}) end)
   local args = {key = 'recover-remove', path = made.path}
-  with_injection({match = {op_key = id('recover-remove')}, fail = 'crash before the result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'crash before the result'}, 1, function()
     expect_error(function() settle(function() return alice:call('worktree.remove', args) end) end, 'crash before the result')
   end)
   local op = pending('recover-remove')

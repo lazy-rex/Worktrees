@@ -147,7 +147,7 @@ test('the main repository, a relative path and a symbolic link parent are refuse
   expect_error(function() create('symlink-parent', 'escape/child') end, 'symbolic link')
   -- The refused create stays pending until it is discarded; then its key returns the discard.
   local id = W.part('alice') .. W.part('symlink-parent')
-  expect(store('catalog').value.pending[id] ~= nil).to_be(true)
+  expect(W.catalog().pending[id] ~= nil).to_be(true)
   expect(alice:call('worktree.discard', {operation = 'symlink-parent', key = 'discard-symlink'}).discarded).to_be(true)
   expect(create('symlink-parent', 'escape/child').status).to_be('discarded')
   expect(exists(lab .. '/child')).to_be(false)

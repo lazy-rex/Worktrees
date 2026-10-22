@@ -72,7 +72,7 @@ test('61 trees in 2 pages, sorted by path, no duplicate or skipped tree; paging 
     for _ in pairs(seen) do n = n + 1 end
     return n == 62
   end, 60)
-  local rev = store('catalog').rev
+  local rev = W.records()
   local seen, order, count = pages(many)
   expect(count).to_be(2)
   expect(#order).to_be(62)
@@ -88,7 +88,7 @@ test('61 trees in 2 pages, sorted by path, no duplicate or skipped tree; paging 
     listed, pos = listed + 1, nl + 1
   end
   expect(listed).to_be(62)
-  expect(store('catalog').rev, 'paging writes nothing').to_be(rev)
+  expect(W.records(), 'paging writes nothing').to_be(rev)
   many_order = order
 end)
 
@@ -113,14 +113,14 @@ test('long escaped text in both lists: every page is within budget; the reply ha
     return n == 32
   end, 60)
   -- Pending operations with escaped text fill the operations page (24 KiB).
-  local state = store('catalog').value
+  local state = W.catalog()
   local text = string.rep('"\\\t', 400)
   for i = 1, 15 do
     local key = string.format('long-op-%02d', i)
     state.pending[W.part('alice') .. W.part(key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. text .. i,
       branch = 'op', repo = long, common = W.real(long .. '/.git'), actor = 'alice', fingerprint = 'synthetic/' .. key}
   end
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local _, order, count, first = pages(long)
   expect(#order).to_be(32)
   expect(count >= 2, 'the long trees need more than one page').to_be(true)
@@ -131,9 +131,9 @@ test('long escaped text in both lists: every page is within budget; the reply ha
   local size = #rex.json.encode(r)
   print('LIST reply bytes ' .. size .. ', margin to 49152 (test client): ' .. (49152 - size) .. ', to 65536: ' .. (65536 - size))
   expect(size <= 45056, 'the reply is within 44 KiB').to_be(true)
-  local p = store('catalog').value
+  local p = W.catalog()
   p.pending = {}
-  write({{key = 'catalog', value = p}})
+  W.set_catalog(p)
 end)
 
 test('a tree with too many workers is compact: workers_count, and hub.workers lists them', function()

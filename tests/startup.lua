@@ -10,16 +10,15 @@ local store_down = 'stream response "c" failed: store down (status=503 code=busy
 local id = '5:alice3:old'
 
 -- sandbox loads the plugin with one remove operation in phase cleanup. Its unlock and its catalog
--- write are hub actions (s.calls, s.order). reads.fail is the number of hub.store.get calls that
--- fail from now on (a table field: the callback writes no captured local).
+-- write are hub actions (s.calls, s.order). reads.fail is the number of hub.sql.query calls (the
+-- start reads the import state and the records with them) that fail from now on (a table field: the callback writes no captured local).
 local function sandbox()
   local s = load_sandbox(tests_dir .. '/..', base)
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
   s.catalog = {repos = {}, pending = {[id] = {kind = 'remove', phase = 'cleanup', path = '/sandbox/worktrees/r/t', fingerprint = 'f'}}}
-  s.hub_answers['hub.store.batch'] = function(args) s.catalog = args.ops[1].value; return {revs = {catalog = '2'}} end
   s.reads = {fail = 0}
-  s.on_hub['hub.store.get'] = function()
-    s.hub_errors['hub.store.get'] = s.reads.fail > 0 and store_down or nil
+  s.on_hub['hub.sql.query'] = function()
+    s.hub_errors['hub.sql.query'] = s.reads.fail > 0 and store_down or nil
     if s.reads.fail > 0 then s.reads.fail = s.reads.fail - 1 end
   end
   return s
@@ -37,10 +36,10 @@ end
 test('the main chunk runs no pcall; the startup timer runs the cleanup, then one refresh', function()
   local s = sandbox()
   expect(s.load_pcalls, 'no pcall during the load').to_be(0)
-  expect(count(s, 'hub.store.get'), 'no catalog read during the load').to_be(0)
+  expect(count(s, 'hub.sql.query'), 'no catalog read during the load').to_be(0)
   s:tick()
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
-  expect(s.catalog.pending[id], 'the cleanup deleted the operation').to_be(nil)
+  expect(s:pending()[id], 'the cleanup deleted the operation').to_be(nil)
   expect(count(s, 'hub.workers'), 'one refresh').to_be(1)
   expect(list(s).result ~= nil).to_be(true)
   expect(count(s, 'hub.cwd.unlock'), 'no second cleanup').to_be(1)
@@ -52,23 +51,23 @@ test('an action before the startup timer runs after the cleanup; the timer then 
   expect(reply.result ~= nil, 'the list answers').to_be(true)
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
   expect(index(s, 'hub.identify') < index(s, 'hub.cwd.unlock'), 'the SDK identifies the caller, then the handler starts').to_be(true)
-  local unlocks, gets = count(s, 'hub.cwd.unlock'), count(s, 'hub.store.get')
+  local unlocks, gets = count(s, 'hub.cwd.unlock'), count(s, 'hub.sql.query')
   s:tick()
   expect(count(s, 'hub.cwd.unlock')).to_be(unlocks)
-  expect(count(s, 'hub.store.get'), 'the timer reads nothing').to_be(gets)
+  expect(count(s, 'hub.sql.query'), 'the timer reads nothing').to_be(gets)
 end)
 
 test('a failed timer attempt stays incomplete: the next action retries and cleans up before its dispatch', function()
   local s = sandbox()
   s.reads.fail = 1
   s:tick()
-  expect(count(s, 'hub.cwd.unlock'), 'no cleanup without the catalog').to_be(0)
-  expect(s.catalog.pending[id] ~= nil).to_be(true)
+  expect(count(s, 'hub.cwd.unlock'), 'no cleanup without the records').to_be(0)
+  expect(next(s:pending()), 'the failed start imported nothing').to_be(nil)
   local reply = list(s)
   expect(reply.result ~= nil, 'the retry succeeds').to_be(true)
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
   expect(index(s, 'hub.identify') < index(s, 'hub.cwd.unlock'), 'the SDK identifies the caller, then the handler starts').to_be(true)
-  expect(s.catalog.pending[id]).to_be(nil)
+  expect(s:pending()[id]).to_be(nil)
   list(s)
   expect(count(s, 'hub.cwd.unlock'), 'no second cleanup').to_be(1)
 end)
@@ -119,8 +118,8 @@ test('a failed cleanup keeps the operation in phase cleanup; startup completes',
   s.hub_errors['hub.cwd.unlock'] = 'unlock down'
   s:tick()
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
-  expect(s.catalog.pending[id] and s.catalog.pending[id].phase).to_be('cleanup')
-  expect(count(s, 'hub.store.batch'), 'no catalog write').to_be(0)
+  expect(s:pending()[id] and s:pending()[id].phase).to_be('cleanup')
+  expect(count(s, 'hub.sql.exec'), 'no cleanup write').to_be(0)
   s.hub_errors['hub.cwd.unlock'] = nil
   expect(list(s).result ~= nil).to_be(true)
   expect(count(s, 'hub.cwd.unlock'), 'a complete start does not clean up again').to_be(1)

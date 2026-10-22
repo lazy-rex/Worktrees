@@ -183,11 +183,11 @@ test('lab: a panel of 300 trees arrives; More… pages, select and Discard work 
   W.settle(function() return alice:call('worktree.create', {repo = repo, branch = 'first', key = 'pages-first'}) end)
   local long = string.rep('x', 200)
   for i = 1, 300 do W.git(repo, 'worktree', 'add', '-q', '-b', string.format('p%03d-%s', i, long), string.format('%s/pages-lab/t%03d', W.root, i)) end
-  local state = store('catalog').value
+  local state = W.catalog()
   local id = W.part('alice') .. W.part('pages-stopped')
   state.pending[id] = {kind = 'create', fingerprint = 'synthetic', repo = repo, common = W.real(repo .. '/.git'),
     path = W.root .. '/pages-lab/stopped', branch = 'stopped', phase = 'prepared', actor = 'alice'}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   user:command('worktrees')
   local panel = user:view('/panels/worktrees')
   expect(panel:action('refresh', 'refresh', {}).status).to_be('succeeded')
@@ -228,5 +228,5 @@ test('lab: a panel of 300 trees arrives; More… pages, select and Discard work 
   expect(opened.result.form).to_be(W.route('/forms/worktree', first))
   user:view(opened.result.form):render()
   expect(discarded, 'Discard on a More page').to_be(true)
-  expect(store('catalog').value.pending[id], 'the operation is discarded').to_be(nil)
+  expect(W.catalog().pending[id], 'the operation is discarded').to_be(nil)
 end)

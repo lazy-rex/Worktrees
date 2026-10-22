@@ -144,7 +144,7 @@ test('a failed unlock keeps the lock and the cleanup; the retry unlocks and retu
   expect(e.code).to_be('unavailable')
   expect(fault_fired(f)).to_be(true)
   -- The result committed; the cleanup is pending.
-  local pending = store('catalog').value.pending[id('unlock')]
+  local pending = W.catalog().pending[id('unlock')]
   expect(pending.phase).to_be('cleanup')
   expect(W.try({'test', '-e', made.path}).ok).to_be(false)
   -- The hub lock is held: a spawn into the path is refused by the lock.
@@ -152,7 +152,7 @@ test('a failed unlock keeps the lock and the cleanup; the retry unlocks and retu
   expect_error(function() alice:hub('hub.spawn', {profile = 'sleep', key = 'into-unlock', cwd = made.path}) end, 'is locked by')
   -- The retry finishes the unlock and returns the committed result.
   expect(alice:call('worktree.remove', {path = made.path, key = 'unlock'}).removed).to_be(true)
-  expect(store('catalog').value.pending[id('unlock')]).to_be(nil)
+  expect(W.catalog().pending[id('unlock')]).to_be(nil)
   local w = alice:hub('hub.spawn', {profile = 'sleep', key = 'after-retry-unlock', cwd = made.path})
   alice:hub('hub.stop', {spawn_id = w.spawn_id})
   W.run({'rmdir', made.path})
@@ -231,12 +231,12 @@ test('view: a shell that an older version started (no open intent) replays its s
   local first
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do if w.cwd == path then first = w.spawn_id end end
   local record = 'open/' .. W.part('user') .. W.part(spawn_key)
-  expect(store(record).value ~= nil, 'the new version saved an intent').to_be(true)
-  write({{key = record, delete = true}})
+  expect(W.reservation(record) ~= nil, 'the new version saved an intent').to_be(true)
+  W.set_reservation(record, nil)
   -- A retry without an intent goes through the new handler: it saves a new intent, then calls
   -- hub.spawn with the same key (refused by the gate until the release).
   wait('the new handler saves an intent again', function()
-    local v = store(record).value
+    local v = W.reservation(record)
     return v and v.phase == 'ready'
   end, 30)
   fault_release(gate)

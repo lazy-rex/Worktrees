@@ -70,7 +70,44 @@ end
 
 -- part and intent name records as the plugin does: part(s) = #s .. ':' .. s.
 function W.part(s) return tostring(#s) .. ':' .. s end
-function W.intent(actor, spawn_key) return store('open/' .. W.part(actor) .. W.part(spawn_key)).value end
+
+-- The plugin's SQL records (worktrees.lua, the schema). catalog gives {repos, pending} in the shape
+-- of the hub.store version's catalog record; set_catalog replaces both tables with it, as another
+-- writer would. reservation gives the record of a discard/ or open/ key (nil if none);
+-- set_reservation writes it (nil deletes it). records gives a text of every table, to show that a
+-- call changed nothing.
+function W.catalog()
+  local state = {repos = {}, pending = {}}
+  for _, r in ipairs(sql('SELECT common, repo FROM repos')) do state.repos[r.common] = r.repo end
+  for _, r in ipairs(sql('SELECT id, op FROM pending')) do state.pending[r.id] = rex.json.decode(r.op) end
+  return state
+end
+function W.set_catalog(state)
+  sql_write('DELETE FROM repos')
+  sql_write('DELETE FROM pending')
+  for common, repo in pairs(state.repos or {}) do sql_write('INSERT INTO repos (common, repo) VALUES (?, ?)', {common, repo}) end
+  for id, op in pairs(state.pending or {}) do sql_write('INSERT INTO pending (id, op) VALUES (?, ?)', {id, rex.json.encode(op)}) end
+end
+function W.reservation(key)
+  local r = sql('SELECT record FROM reservations WHERE key = ?', {key})[1]
+  return r and rex.json.decode(r.record) or nil
+end
+function W.set_reservation(key, record)
+  if record == nil then sql_write('DELETE FROM reservations WHERE key = ?', {key})
+  else sql_write('INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', {key, rex.json.encode(record)}) end
+end
+-- put_op saves an operation result, as the plugin's finish does.
+function W.put_op(key, fingerprint, result)
+  sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {key, fingerprint, rex.json.encode(result)})
+end
+function W.records()
+  local parts = {}
+  for _, t in ipairs({'repos', 'pending', 'ops', 'reservations', 'meta'}) do
+    parts[#parts + 1] = t .. '=' .. rex.json.encode(sql('SELECT * FROM ' .. t .. ' ORDER BY 1'))
+  end
+  return table.concat(parts, '\n')
+end
+function W.intent(actor, spawn_key) return W.reservation('open/' .. W.part(actor) .. W.part(spawn_key)) end
 
 -- route encodes a selected path as the plugin does (route_with_path).
 function W.route(base, path)

@@ -25,10 +25,9 @@ local function user_remove(path, key)
   return form:action('remove_worktree', 'submit', {values = {path = path}}, key)
 end
 
-test("an agent removes another agent's tree; the branch stays; the catalog keeps no owner", function()
+test("an agent removes another agent's tree; the branch stays", function()
   local t = create(alice, 'rm/one', 'rm-one')
   expect(t.created).to_be(true)
-  expect(store('catalog').value.owners).to_be(nil)
   expect(remove(bob, t.path, 'bob-rm-one').removed).to_be(true)
   expect(exists(t.path)).to_be(false)
   expect(W.git(repo, 'branch', '--list', 'rm/one')).to_match('rm/one')
@@ -73,23 +72,14 @@ test("the safety checks stay for another agent's tree", function()
   expect(exists(t.path)).to_be(false)
 end)
 
-test('owner records from an older version are dropped and grant nothing', function()
-  local t = create(alice, 'rm/legacy', 'rm-legacy')
-  local state = store('catalog').value
-  state.owners = {[t.path] = {agent = 'alice', identity = 'old'}}
-  write({{key = 'catalog', value = state}})
-  expect(remove(bob, t.path, 'bob-rm-legacy').removed).to_be(true)
-  expect(store('catalog').value.owners).to_be(nil)
-end)
-
 test('a pending create from an older version (no actor) completes; any agent removes the tree', function()
   local branch, key = 'rm/old-op', 'old-op'
   local path = W.root .. '/remove/' .. branch
   local common = W.real(repo .. '/.git')
-  local state = store('catalog').value
+  local state = W.catalog()
   state.pending[W.part('alice') .. W.part(key)] = {kind = 'create', fingerprint = 'create/' .. W.part(repo) .. W.part(branch) .. W.part(''),
     repo = repo, common = common, path = path, branch = branch, commit = W.git(repo, 'rev-parse', 'HEAD'), created = true, phase = 'prepared'}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   local t = create(alice, branch, key)
   expect(t.created).to_be(true)
   expect(exists(path)).to_be(true)

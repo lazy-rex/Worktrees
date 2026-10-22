@@ -6,7 +6,7 @@ local load_sandbox = load_fixture(tests_dir .. '/support/sandbox.lua')
 local base = getfenv(1)
 
 -- sandbox loads the plugin with a fake Git. repos maps a repository to its number of trees (the
--- main tree and the linked trees /sandbox/worktrees/<name>/t-NN). recorded: the catalog repos.
+-- main tree and the linked trees /sandbox/worktrees/<name>/t-NN). recorded: the rows of the repos table.
 local function sandbox(repos, recorded)
   local s = load_sandbox(tests_dir .. '/..', base)
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
@@ -49,9 +49,8 @@ local function sandbox(repos, recorded)
     fake.started[#fake.started + 1] = h
     return h
   end
-  local catalog = {repos = {}, pending = {}}
-  for _, top in ipairs(recorded) do catalog.repos[top .. '/.git'] = top end
-  s.catalog = catalog
+  -- The recorded repositories, written after the start (the first tick above), as a create would.
+  for _, top in ipairs(recorded) do sql_write('INSERT INTO repos (common, repo) VALUES (?, ?)', {top .. '/.git', top}) end
   return s
 end
 local function running(s)
@@ -179,11 +178,6 @@ end)
 
 test('Forget drops the snapshots of its repository: their queued jobs start nothing (sandbox)', function()
   local s = sandbox({['/r/a'] = 4, ['/r/b'] = 20}, {'/r/a', '/r/b'})
-  s.hub_answers['hub.store.op'] = function() return {found = false} end
-  s.hub_answers['hub.store.batch'] = function(args)
-    s.catalog = args.ops[1].value
-    return {revs = {catalog = '2'}}
-  end
   -- The /r/b snapshot queues 20 jobs, then the snapshot of all repositories 24.
   expect(list(s, {repo = '/r/b'}).refreshing).to_be(true)
   expect(list(s).refreshing).to_be(true)
@@ -193,7 +187,7 @@ test('Forget drops the snapshots of its repository: their queued jobs start noth
   finish(s)
   local reply = s:perform('worktree.forget', {repo = '/r/b', key = 'f'}, s.agent)
   expect(reply.result and reply.result.forgotten, tostring(reply.error and reply.error.message)).to_be(true)
-  expect(s.catalog.repos['/r/b/.git']).to_be(nil)
+  expect(s:repos()['/r/b/.git']).to_be(nil)
   drain(s)
   -- 8 of /r/b, the 24 jobs of all repositories (a row it drops still ends its job), then the
   -- restart of the stale snapshot: /r/a only. The other 12 jobs of /r/b start nothing.

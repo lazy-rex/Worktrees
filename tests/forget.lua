@@ -13,7 +13,7 @@ local function forget(repo, key, accept)
   return alice:call('worktree.forget', {repo = repo, key = key, accept_unattributed = accept})
 end
 local function recorded(repo)
-  for _, value in pairs(store('catalog').value.repos or {}) do if value == repo then return true end end
+  for _, value in pairs(W.catalog().repos or {}) do if value == repo then return true end end
   return false
 end
 -- rows waits for a finished scan of the recorded repositories and returns its rows by path.
@@ -69,16 +69,16 @@ test('a healthy repository: refused for a worker in its tree and for an unfinish
   local main_worker = sleeper(healthy, 'w-main')
   expect_error(function() forget(healthy, 'f-healthy') end, 'refused')
   stop(main_worker)
-  local state = store('catalog').value
+  local state = W.catalog()
   local id = W.part('alice') .. W.part('stopped')
   state.pending[id] = {kind = 'create', fingerprint = 'synthetic', repo = healthy, common = W.real(healthy .. '/.git'),
     path = W.root .. '/healthy/stopped', branch = 'stopped', phase = 'prepared', actor = 'alice'}
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
   err = expect_error(function() forget(healthy, 'f-healthy') end, 'refused')
   expect(err.message).to_match('unfinished operation')
-  state = store('catalog').value
+  state = W.catalog()
   state.pending[id] = nil
-  write({{key = 'catalog', value = state}})
+  W.set_catalog(state)
 
   local before = trees(healthy)
   local r = forget(healthy, 'f-healthy')
@@ -133,10 +133,10 @@ end)
 test('a later create records the repository again; the same-key Forget returns the saved result and changes nothing', function()
   create(healthy, 'again', 'again')
   expect(recorded(healthy)).to_be(true)
-  local rev = store('catalog').rev
+  local rev = W.records()
   expect(forget(healthy, 'f-healthy').forgotten).to_be(true)
   expect(recorded(healthy), 'the replay does not forget it again').to_be(true)
-  expect(store('catalog').rev).to_be(rev)
+  expect(W.records()).to_be(rev)
 end)
 
 -- Two repositories with a linked tree each, then moved away: Git cannot list them.
@@ -149,11 +149,11 @@ W.run({'mv', gone_a, gone_a .. '.away'})
 W.run({'mv', gone_b, gone_b .. '.away'})
 
 test('an agent: an unavailable repository with unattributed workers needs a confirmation before any catalog write', function()
-  local rev = store('catalog').rev
+  local rev = W.records()
   local err = expect_error(function() forget(gone_a, 'f-gone-a') end, 'needs_confirmation')
   expect(err.message).to_contain(lost_worker)
   expect(err.message).to_contain(lost_a)
-  expect(store('catalog').rev, 'no catalog write').to_be(rev)
+  expect(W.records(), 'no catalog write').to_be(rev)
   expect(recorded(gone_a)).to_be(true)
   -- The same key with the acceptance: needs_confirmation was not saved.
   local r = forget(gone_a, 'f-gone-a', true)

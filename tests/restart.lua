@@ -11,7 +11,7 @@ local alice = agent('alice')
 write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
 
 local function id(key) return W.part('alice') .. W.part(key) end
-local function pending(key) return ((store('catalog').value or {}).pending or {})[id(key)] end
+local function pending(key) return ((W.catalog() or {}).pending or {})[id(key)] end
 local function settle(fn) return W.settle(fn, 'the operation', 30) end
 local function create(key, branch) return settle(function() return alice:call('worktree.create', {key = key, repo = repo, branch = branch}) end) end
 local function worktrees_with(branch)
@@ -40,7 +40,7 @@ test('a crash after Git starts, before its block ID is saved: the retry finds th
   W.run({'chmod', '755', repo .. '/.git/hooks/post-checkout'})
   local args = {key = 'slow-create', repo = repo, branch = 'restart/slow'}
   -- Catalog batches of a create: admission, phase sending, then the block ID. The third fails.
-  with_injection({match = {writes = 'catalog'}, skip = 2, fail = 'crash before the block ID'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'pending'}, skip = 2, fail = 'crash before the block ID'}, 1, function()
     expect_error(function() alice:call('worktree.create', args) end, 'crash before the block ID')
   end)
   local op = pending('slow-create')
@@ -68,7 +68,7 @@ end)
 
 test('create: Git finished, the result did not commit, then a crash; the retry creates one tree', function()
   local args = {key = 'recover-create', repo = repo, branch = 'restart/create'}
-  with_injection({match = {op_key = id('recover-create')}, fail = 'crash before the result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'crash before the result'}, 1, function()
     expect_error(function() settle(function() return alice:call('worktree.create', args) end) end, 'crash before the result')
   end)
   local op = pending('recover-create')
@@ -85,7 +85,7 @@ end)
 test('remove: Git finished, the result did not commit, then a crash; the lock holds until the retry', function()
   local made = create('to-remove', 'restart/remove')
   local args = {key = 'recover-remove', path = made.path}
-  with_injection({match = {op_key = id('recover-remove')}, fail = 'crash before the result'}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'crash before the result'}, 1, function()
     expect_error(function() settle(function() return alice:call('worktree.remove', args) end) end, 'crash before the result')
   end)
   local op = pending('recover-remove')

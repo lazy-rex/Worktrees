@@ -29,7 +29,7 @@ local function repo_at(dir)
 end
 local function pending_count()
   local n = 0
-  for _ in pairs(store('catalog').value.pending or {}) do n = n + 1 end
+  for _ in pairs(W.catalog().pending or {}) do n = n + 1 end
   return n
 end
 
@@ -81,13 +81,13 @@ test('a listed tree with a missing directory is refused, also when it is locked;
     W.git(repo, 'worktree', 'add', '-q', '-b', branch, old)
     if branch == 'held' then W.git(repo, 'worktree', 'lock', old) end
     W.run({'rm', '-rf', old})
-    local rev, pending, before = store('catalog').rev, pending_count(), adds()
+    local rev, pending, before = W.records(), pending_count(), adds()
     local err = expect_error(function() create(repo, branch, 'stale-' .. branch) end, 'refused')
     expect(err.message).to_contain(old)
     expect(err.message).to_contain('missing')
     expect(adds(), 'no git worktree add').to_be(before)
     expect(pending_count(), 'no pending operation').to_be(pending)
-    expect(store('catalog').rev, 'no catalog write').to_be(rev)
+    expect(W.records(), 'no catalog write').to_be(rev)
     expect(exists(old), 'no tree at the old path').to_be(false)
     expect(exists(W.tree_path(repo, branch)), 'no tree at the new path').to_be(false)
   end
