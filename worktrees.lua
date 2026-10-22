@@ -1475,10 +1475,9 @@ local function ui_render(args)
   elseif base:sub(1, 22) == '/forms/worktree-agent/' then tree = render_agent(base:sub(23), path)
   else fail('invalid_input', 'Unknown route') end
   if base:sub(1, 7) == '/forms/' then tree.status = {state = 'blocked', kind = 'question', msg = 'Waiting for input'} end
-  -- The final size check, with the status (see Panel pages): a reply that is too large never arrives.
-  local reply = {tree = tree}
-  if encoded(reply) > view_bytes then fail('too_large', 'This view is larger than 48 KiB') end
-  return reply
+  -- The SDK checks the final size of each view, with the status (48 KiB): a larger view fails
+  -- with too_large, because a reply that is too large never arrives.
+  return tree
 end
 
 -- worktree.open, the menu's Open items, the Start agent form and the shell after New Worktree all
@@ -1819,7 +1818,7 @@ for _, a in ipairs(actions) do
 end
 
 -- The panel and the forms are raw views: the panel pages and the forms build their own trees.
-local views = {render = started_render(function(ctx, args) return ui_render(args).tree end),
+local views = {render = started_render(function(ctx, args) return ui_render(args) end),
   ['view.action'] = started(function(ctx, args) return ui_action(args) end)}
 app.view('/panels/worktrees', views, raw)
 app.view('/forms/*', views, raw)
