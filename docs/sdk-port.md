@@ -51,25 +51,37 @@ CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT N
 CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, record TEXT NOT NULL);
                                            -- the discard/ and open/ records, each whole as JSON (an open intent
                                            -- keeps its request, keys and state, not only a path)
-CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);   -- kv_import_after, kv_import
+CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);   -- kv_import_progress, kv_import
 ```
 
-Import (once, in the start hook), in pages: each `hub.sql.batch` copies one page and writes the
-progress row `meta(name = 'kv_import_after')` with the last key of that page; a restart resumes from
-it. Sources: the KV record `catalog` (repos and pending), `hub.store.scan` with the prefixes `open/` and
-`discard/`, and `hub.store.ops_scan` for every saved operation result (hub lead, to be added on
-hub/sql). The last batch writes `meta(name = 'kv_import', value = 'done')` with the last page. The importing
-instance is the only writer of its namespace (the retirement fence), and it writes none of these keys
-until the import is complete, so the source stays stable. Only the done row says that the import
-is complete: empty `repos` and `pending` are valid after Forget, so they never
-trigger an import. Every saved result moves, also a completed operation that no pending entry or
-reservation names; else its key could run again. The KV store has no key listing today, so G8
-must be resolved before the cutover.
+Import (once, in the start hook), in pages. The sources, in this order, each with its own key space:
+(1) the KV record `catalog` (repos and pending, one page), (2) `hub.store.scan` with the prefix
+`open/`, (3) `hub.store.scan` with the prefix `discard/`, (4) `hub.store.ops_scan` for every saved
+operation result (hub lead, to be added on hub/sql). Each `hub.sql.batch` copies one page and writes
+the progress row `meta(name = 'kv_import_progress')` with the source and the cursor together (for
+example `ops:<last key>`); the move to the next source writes the new source with an empty cursor. A
+restart resumes from that row. The last batch writes `meta(name = 'kv_import', value = 'done')` with
+the last page. Only the done row says that the import is complete: empty `repos` and `pending` are
+valid after Forget, so they never start an import. Every saved result moves, also a completed
+operation that no pending entry or reservation names; else its key could run again.
 
-Rollback boundary: before the import commit, a rollback to the KV plugin is safe. After it, the SQL
-tables are the only current state: the KV records stay as a copy of the old state, and a rollback
-to the KV plugin would lose every later SQL write. The plan has no dual writes. A rollback after
-the cutover needs a reverse export, which this plan does not provide.
+Until the done row commits, the plugin is inactive: every action and view answers `unavailable`
+("import in progress"), and no cleanup, refresh or scan reads the partial SQL state. The importing
+instance is the only writer of its namespace (the retirement fence), and it writes no KV key, so the
+source stays stable during the import.
+
+Rollback: before the done row, no SQL-era write exists (the plugin is inactive), so a rollback to
+the KV plugin is safe only after a reset: with the hub stopped, delete the plugin's SQL file
+(`<state>/sql/worktrees.db`). Without that reset, the KV plugin can change the source, and a later SQL
+start would resume stale progress; so a rollback without the reset is not supported. After the done
+row, the SQL tables are the only current state: the KV records stay as a copy of the old state, and
+a rollback to the KV plugin would lose every later SQL write. The plan has no dual writes and no
+reverse export, so a rollback after the done row is not supported.
+
+Tests (import): a restart after each source transition; a restart after a page commit whose reply
+was lost (the batch committed; the retry finds the progress row and does not copy the page twice);
+a restart after Forget leaves empty tables empty (no second import); a replay of an imported
+completed operation that nothing names; actions before the done row answer `unavailable`.
 
 ## 4. What I delete
 
