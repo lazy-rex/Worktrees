@@ -1,4 +1,5 @@
--- Tree paths (decision "New worktree paths carry a short repository ID"): a new tree goes in
+-- Tree paths (decision "new LazyRex worktree paths distinguish repositories with a short Git common
+-- directory hash"): a new tree goes in
 -- <root>/<name>-<id>/<branch>, with a 6-hex ID from the common Git directory path. A linked tree of
 -- the branch inside the root, at any path, is the requested tree: Git checks a branch out in at most
 -- one tree. The main tree is never reused. A listed tree with a missing directory is refused.

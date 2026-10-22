@@ -1,5 +1,5 @@
--- Ignored files and worktree.remove (decision "LazyRex worktree remove refuses ignored files unless
--- accept ignored is set", the user, 2026-10-22). By default ignored files refuse removal. With
+-- Ignored files and worktree.remove (decision "lazyrex worktree removal deletes ignored files only
+-- with explicit accept_ignored"). By default ignored files refuse removal. With
 -- accept_ignored = true the plugin runs plain git worktree remove (no --force): Git deletes the
 -- ignored files with the tree and still refuses changes and untracked files (observed on Git 2.54.0).
 -- accept_ignored = true is part of the request content; omitted or false adds nothing to it.

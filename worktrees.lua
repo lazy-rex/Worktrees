@@ -98,8 +98,8 @@ end
 -- status_refusal gives the refusal for the output of a status_command, or nil for no output. An
 -- entry other than '!! ' (ignored) is a change. With -z, the second path of a rename follows its
 -- change entry, so the change is found first.
--- Ignored files refuse removal unless the caller sets accept_ignored (decision "LazyRex worktree remove
--- refuses ignored files unless accept ignored is set", the user, 2026-10-22).
+-- Ignored files refuse removal unless the caller sets accept_ignored (decision "lazyrex worktree
+-- removal deletes ignored files only with explicit accept_ignored").
 local ignored_refusal = 'The worktree has ignored files; removal is refused. To delete them with the tree, use a new key with accept_ignored = true (in the Remove form: Also delete ignored files)'
 local changes_refusal = 'The worktree has changes or untracked files; removal is refused'
 local function status_refusal(stdout)
@@ -414,8 +414,8 @@ local function create(caller, id, fingerprint, args, pending)
     local name = info.repo:match('([^/]+)$')
     if not name then fail('invalid_input', 'The repository needs a directory name') end
     -- A linked tree of the branch inside the root, at any path, is the requested tree: Git checks a
-    -- branch out in at most one tree. The main tree is never one (decision "New worktree paths carry
-    -- a short repository ID").
+    -- branch out in at most one tree. The main tree is never one (decision "new LazyRex worktree
+    -- paths distinguish repositories with a short Git common directory hash").
     local listed
     for i, tree in ipairs(trees(info.common)) do
       if i > 1 and not tree.bare and tree.branch == branch and within(tree.path, root) then listed = tree.path end
@@ -565,8 +565,9 @@ local function discard(id)
   return finish(id, op, {status = 'discarded', discarded = true, path = op.path})
 end
 -- worktree.discard and the panel's Discard button. The target is selected by exactly one of:
--- - id: a full operation ID, any pending operation (decision "Agents may act on anything", 2026-10-19:
---   an agent may discard what the user can). The panel uses id.
+-- - id: a full operation ID, any pending operation: an agent may discard what the user can (decision
+--   "LazyRex trusts agents to act across creator boundaries while retaining validation and replay
+--   checks"). The panel uses id.
 -- - operation: an operation key of the caller, resolved through its aliases (its own operations).
 -- The request key reserves its target before the target changes: a reservation
 -- discard/<part(actor)><part(key)> = {fingerprint, id}. The request key is the caller's own. A retry
@@ -1210,7 +1211,8 @@ app.on('block_closed', function(ev, ctx)
   if was_managed then notify('always') end
 end, raw)
 
--- The Worktrees panel and forms (the maintainer, 2026-10-17: no tab; palette commands and a side panel).
+-- The Worktrees panel and forms (decision "LazyRex Worktrees has no tab and uses palette commands and
+-- a side panel").
 -- A route carries a selected tree as a query: /forms/worktree?path=<percent-encoded path>.
 -- trees_for gives the known trees: the source repository first, then the recorded repositories.
 -- It also gives the main path of the source repository (nil when it has no rows).
@@ -1666,8 +1668,8 @@ local function ui_action(args)
       return open_effect(open_menu(args, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
     end
   elseif base == '/forms/new-worktree' and args.node_id == 'new_worktree' and args.action == 'submit' then
-    -- the maintainer (2026-10-17): after New Worktree, open a shell there in a new tab. A retry replays the
-    -- same Git operation and the same spawn key.
+    -- After New Worktree, open a shell there in a new tab (decision "LazyRex New Worktree opens a shell
+    -- in the new tree in a new tab"). A retry replays the same Git operation and the same spawn key.
     local result = submit_worktree(args)
     if result.status == 'running' or result.created == nil then return result end
     local ok, effect = pcall(function()
@@ -1737,7 +1739,8 @@ local actions = {
 local startup = {complete = false, tabs = false}
 local function start()
   if startup.complete then return end
-  -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel. The hub
+  -- Worktrees has no tab (decision "LazyRex Worktrees has no tab and uses palette commands and a side
+  -- panel"). The hub
   -- accepts hub.ui.tabs only from a registered instance, so it waits for the SDK's registration.
   if not startup.tabs then hub('hub.ui.tabs', {tabs = {}}); startup.tabs = true end
   local state = catalog()

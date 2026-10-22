@@ -1,5 +1,5 @@
--- Who may remove a worktree (decision "Agents may act on anything", 2026-10-19): an agent
--- removes any managed tree, also one that another agent or the user created. The safety checks stay
+-- Who may remove a worktree (decision "LazyRex trusts agents to act across creator boundaries while
+-- retaining validation and replay checks"): an agent removes any managed tree, also one that another agent or the user created. The safety checks stay
 -- for every caller: no forced removal, and a refusal for changes, ignored files, workers and panes.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local repo = W.repo('remove')
