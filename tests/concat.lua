@@ -29,7 +29,7 @@ local function sandbox()
     if argv[1] == 'test' then return ok('') end
   end
   s.start_hook = function() return nil, 'no fork' end
-  s.catalog = {repos = {['/r/.git'] = '/r', ['/q/.git'] = '/q'}, pending = {}}
+  s:set_catalog({repos = {['/r/.git'] = '/r', ['/q/.git'] = '/q'}, pending = {}})
   return s
 end
 local function workers(cwd)

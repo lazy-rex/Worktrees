@@ -8,8 +8,8 @@
 --   s.workers = {...}; s:tick()   -- hub.workers answers s.workers; tick runs the armed timers
 -- s.exec_hook(argv) answers a command (nil: the default answer; nil and an error: the process did
 -- not start); s.start_hook(argv, opts) answers
--- a process start (rex.exec.start). s.catalog is the catalog record of the hub.store version: the
--- first start imports it into SQL. s:pending() and s:repos() read the SQL records.
+-- a process start (rex.exec.start). s:set_catalog({repos, pending}) writes those SQL records, as
+-- another writer would. s:pending() and s:repos() read the SQL records.
 -- s.loaded and s.load_error report the load; s:perform answers the plugin's client.reply.
 -- s.on_hub[action] = fn runs fn when the plugin calls that hub action. s.hub_answers[action] = fn(args) gives the result of that hub action. s.calls[action] counts the hub actions; s.timers holds the rex.after callbacks not yet run.
 -- s.rex_answers[method] = fn(args) gives the result of a Rex call (not client.perform).
@@ -23,9 +23,8 @@ return function(plugin_dir, base, opts)
   -- hub.sql runs on the plugin's database in the lab (the harness sql and sql_write), one statement
   -- at a time: a batch without a transaction is not atomic here. A transaction keeps its writes
   -- until the commit (s.tx_writes), so a rollback, or a failure before the commit, writes nothing; a
-  -- query in it does not see them. sandbox() empties the tables first, so the import copies
-  -- s.catalog at the first start.
-  local tables = {'repos', 'pending', 'ops', 'reservations', 'meta', 'staging'}
+  -- query in it does not see them. sandbox() empties the tables first (unless opts.keep).
+  local tables = {'repos', 'pending', 'ops', 'reservations', 'staging'}
   if not opts.keep then for _, t in ipairs(tables) do base.sql_write('DELETE FROM ' .. t) end end
   s.transactions = 0
   local function sandbox_sql(action, a)
@@ -109,7 +108,6 @@ return function(plugin_dir, base, opts)
           if not ok then return nil, tostring(result) end
           return {result = result}
         end
-        if args.action == 'hub.store.get' then return {result = {records = {catalog = {rev = '1', value = s.catalog or {repos = {}, pending = {}}}}}} end
         if args.action == 'hub.workers' then return {result = {workers = s.workers}} end
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 'session'}} end
         return {result = {}}
@@ -175,6 +173,10 @@ return function(plugin_dir, base, opts)
     local out = {}
     for _, r in ipairs(base.sql('SELECT common, repo FROM repos')) do out[r.common] = r.repo end
     return out
+  end
+  function s:set_catalog(c)
+    for common, repo in pairs(c.repos or {}) do base.sql_write('INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', {common, repo}) end
+    for id, op in pairs(c.pending or {}) do base.sql_write('INSERT OR REPLACE INTO pending (id, op) VALUES (?, ?)', {id, rex.json.encode(op)}) end
   end
   -- tick runs the timers armed so far; a timer that a callback arms waits for the next tick.
   function s:tick()

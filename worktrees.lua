@@ -118,9 +118,9 @@ local function identity(path)
   -- Rex runs on macOS. Birth time and inode distinguish a replacement at the same path.
   return dir .. '\n' .. checked({'stat', '-f', '%d:%i:%B', dir})
 end
--- The records (hub.sql, docs/sdk-port.md): the recorded repositories (Git common directory ->
--- main tree), the pending operations (the operation record as JSON), the saved operation results,
--- the reservations of discard and open requests (each record as JSON), and the import state.
+-- The records (hub.sql): the recorded repositories (Git common directory -> main tree), the
+-- pending operations (the operation record as JSON), the saved operation results, and the
+-- reservations of discard and open requests (each record as JSON).
 -- Rex runs one handler at a time, and the hub fences an old instance, so a read and the writes
 -- after it see no other writer. Each phase commit is one write (all or nothing).
 local db, json = app.db, rex.json
@@ -132,6 +132,8 @@ db.migrate {
   'CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)',
   -- The values of one write that do not fit a statement (write).
   'CREATE TABLE staging (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)',
+  -- meta kept the state of the one-time copy of the hub.store records, which is removed.
+  'DROP TABLE meta',
 }
 -- rows reads every row of a query; a reply that the hub cut (about 1 MB) is an error.
 local function rows(sql, ...)
@@ -139,11 +141,7 @@ local function rows(sql, ...)
   if more then fail('too_large', 'The worktree records are larger than one reply') end
   return list
 end
--- Until the import of the hub.store records ends (start), no read of the repositories and the
--- pending operations sees a part of them: a refresh, a render or an action fails with unavailable.
-local imported = {done = false}
 local function catalog()
-  if not imported.done then fail('unavailable', 'The import of the worktree records is not complete') end
   local state = {repos = {}, pending = {}}
   for _, r in ipairs(rows('SELECT common, repo FROM repos')) do state.repos[r.common] = r.repo end
   for _, r in ipairs(rows('SELECT id, op FROM pending')) do state.pending[r.id] = json.decode(r.op) end
@@ -1730,63 +1728,11 @@ local actions = {
 -- The startup work runs after the main chunk and the SDK's registration (both rex.after(0), in
 -- order), so the main chunk runs no pcall: on Rex 0.0.1792158932-g88fd41, a catch in the main
 -- chunk splits module-level locals between the closures made before and after it (hub
--- docs/rex-protocol.md, "Rex Lua runtime"). start() either completes or raises the error of its import or read
+-- docs/rex-protocol.md, "Rex Lua runtime"). start() either completes or raises the error of its read
 -- and stays incomplete; each handler calls it first, so a failed startup read fails the action and
 -- nothing dispatches. A completed operation can leave an unlock pending after a lost hub reply: each
 -- cleanup has its own catch, and a failed one stays in phase cleanup (a same-key replay, a discard
 -- or the next start ends it). The state is a table field, not an upvalue that a closure writes.
--- The import (docs/sdk-port.md, section 3) copies the records of the hub.store version once, in
--- pages: the catalog record, the open/ and discard/ reservations, then every saved operation result
--- (also one that no pending operation names: else its key could run again). Each page is one write
--- with its progress row (the source and its cursor), so a page commits whole or not at all, and a
--- restart goes on after the last page that committed. A page of hub.store.scan or
--- hub.store.ops_scan is at most 512 KiB of records, so its write is a few batches. Each copy is an
--- INSERT OR REPLACE, so a page that commits again gives the same rows. Only the row
--- kv_import = done ends the import: empty tables are valid after Forget. The hub.store records
--- stay as they are.
-local import_sources = {'catalog', 'open/', 'discard/', 'ops'}
--- import_page gives the copy statements of one page of a source, and the cursor of the next page.
-local function import_page(source, cursor)
-  local out, after = {}, cursor ~= '' and cursor or nil
-  local function add(list) for _, s in ipairs(list) do out[#out + 1] = s end end
-  if source == 'catalog' then
-    local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
-    local value = r and r.value or {}
-    for common, repo in pairs(value.repos or {}) do out[#out + 1] = {'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', common, repo} end
-    for id, op in pairs(value.pending or {}) do add(put_pending(id, op)) end
-    return out, nil
-  end
-  if source == 'ops' then
-    local page = hub('hub.store.ops_scan', {after = after})
-    for _, op in ipairs(page.ops or {}) do
-      out[#out + 1] = {'INSERT OR REPLACE INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', op.key, op.fingerprint or '', json.encode(op.result)}
-    end
-    return out, page.next
-  end
-  local page = hub('hub.store.scan', {prefix = source, after = after})
-  local keys = {}
-  for key in pairs(page.records or {}) do keys[#keys + 1] = key end
-  table.sort(keys)
-  for _, key in ipairs(keys) do add(reservation_row(key, page.records[key].value)) end
-  return out, page.next
-end
-local function import()
-  if db.first("SELECT value FROM meta WHERE name = 'kv_import'") then imported.done = true; return end
-  local progress = db.first("SELECT value FROM meta WHERE name = 'kv_import_progress'")
-  local source, cursor = 1, ''
-  if progress then
-    local n, c = progress.value:match('^(%d+):(.*)$')
-    source, cursor = tonumber(n), c
-  end
-  while source <= #import_sources do
-    local statements, next_cursor = import_page(import_sources[source], cursor)
-    if next_cursor then cursor = next_cursor else source, cursor = source + 1, '' end
-    local last = {{'INSERT OR REPLACE INTO meta (name, value) VALUES (?, ?)', 'kv_import_progress', source .. ':' .. cursor}}
-    if source > #import_sources then last[2] = {"INSERT INTO meta (name, value) VALUES ('kv_import', 'done')"} end
-    write(statements, last)
-  end
-  imported.done = true
-end
 
 local startup = {complete = false, tabs = false}
 local function start()
@@ -1794,14 +1740,13 @@ local function start()
   -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel. The hub
   -- accepts hub.ui.tabs only from a registered instance, so it waits for the SDK's registration.
   if not startup.tabs then hub('hub.ui.tabs', {tabs = {}}); startup.tabs = true end
-  import()
   local state = catalog()
   for id, op in pairs(state.pending) do if op.phase == 'cleanup' then pcall(cleanup_done, id) end end
   startup.complete = true
   refresh_safe()
 end
 local function started(fn) return function(ctx, args) start(); return fn(ctx, args) end end
--- A render cannot write (SDK eb9654d), and start() writes: the import and the cleanup of finished
+-- A render cannot write (SDK eb9654d), and start() writes: the cleanup of finished
 -- operations. So a render before the start completes runs no start: it arms one start on a timer
 -- and fails with unavailable. When that start completes, its refresh renders the views again; when
 -- it fails, the next render, action or event tries again.

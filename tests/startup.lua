@@ -11,11 +11,11 @@ local id = '5:alice3:old'
 
 -- sandbox loads the plugin with one remove operation in phase cleanup. Its unlock and its catalog
 -- write are hub actions (s.calls, s.order). reads.fail is the number of hub.sql.query calls (the
--- start reads the import state and the records with them) that fail from now on (a table field: the callback writes no captured local).
+-- start reads the records with them) that fail from now on (a table field: the callback writes no captured local).
 local function sandbox()
   local s = load_sandbox(tests_dir .. '/..', base)
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
-  s.catalog = {repos = {}, pending = {[id] = {kind = 'remove', phase = 'cleanup', path = '/sandbox/worktrees/r/t', fingerprint = 'f'}}}
+  s:set_catalog({repos = {}, pending = {[id] = {kind = 'remove', phase = 'cleanup', path = '/sandbox/worktrees/r/t', fingerprint = 'f'}}})
   s.reads = {fail = 0}
   s.on_hub['hub.sql.query'] = function()
     s.hub_errors['hub.sql.query'] = s.reads.fail > 0 and store_down or nil
@@ -62,7 +62,7 @@ test('a failed timer attempt stays incomplete: the next action retries and clean
   s.reads.fail = 1
   s:tick()
   expect(count(s, 'hub.cwd.unlock'), 'no cleanup without the records').to_be(0)
-  expect(next(s:pending()), 'the failed start imported nothing').to_be(nil)
+  expect(s:pending()[id] ~= nil, 'the failed start keeps the operation').to_be(true)
   local reply = list(s)
   expect(reply.result ~= nil, 'the retry succeeds').to_be(true)
   expect(count(s, 'hub.cwd.unlock')).to_be(1)

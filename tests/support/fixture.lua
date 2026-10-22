@@ -71,9 +71,9 @@ end
 -- part and intent name records as the plugin does: part(s) = #s .. ':' .. s.
 function W.part(s) return tostring(#s) .. ':' .. s end
 
--- The plugin's SQL records (worktrees.lua, the schema). catalog gives {repos, pending} in the shape
--- of the hub.store version's catalog record; set_catalog replaces both tables with it, as another
--- writer would. reservation gives the record of a discard/ or open/ key (nil if none);
+-- The plugin's SQL records (worktrees.lua, the schema). catalog gives {repos, pending}: the
+-- recorded repositories and the pending operations; set_catalog replaces both tables with it, as
+-- another writer would. reservation gives the record of a discard/ or open/ key (nil if none);
 -- set_reservation writes it (nil deletes it). records gives a text of every table, to show that a
 -- call changed nothing.
 function W.catalog()
@@ -102,7 +102,7 @@ function W.put_op(key, fingerprint, result)
 end
 function W.records()
   local parts = {}
-  for _, t in ipairs({'repos', 'pending', 'ops', 'reservations', 'meta'}) do
+  for _, t in ipairs({'repos', 'pending', 'ops', 'reservations'}) do
     parts[#parts + 1] = t .. '=' .. rex.json.encode(sql('SELECT * FROM ' .. t .. ' ORDER BY 1'))
   end
   return table.concat(parts, '\n')

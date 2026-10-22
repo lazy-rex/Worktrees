@@ -32,7 +32,7 @@ local function sandbox(n, ops)
   for i = 1, n do
     s.workers[#s.workers + 1] = {spawn_id = 'spawn-' .. i, cwd = string.format('/sandbox/worktrees/r/t%03d', i), state = 'running', title = noisy(3000)}
   end
-  s.catalog = {repos = {['/r/.git'] = '/r'}, pending = ops or {}}
+  s:set_catalog({repos = {['/r/.git'] = '/r'}, pending = ops or {}})
   s:tick()
   return s
 end

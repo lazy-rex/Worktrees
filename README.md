@@ -105,9 +105,6 @@ The plugin runs on the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). The 
 through the SDK's `boot.lua`, so the hub must have the SDK launcher. The plugin keeps its records in its
 SQL database (`hub.sql`). One request is at most 64 KiB, so a large value (a long open request or key, as JSON inside a
 SQL parameter) goes first in pieces to a staging table, and one transaction writes the record.
-At its first start, the plugin copies the records of an older version from `hub.store` once, in
-pages. Each page commits whole or not at all, and a restart goes on after the last page that
-committed. Until the copy is complete, each action and view fails, with the error of the failed copy or with `unavailable`. The `hub.store` records stay as they were.
 
 ## Tests
 
