@@ -187,3 +187,59 @@ test('an imported result that no pending operation names replays for its key; no
   expect(reply.result.path).to_be('/sandbox/worktrees/r/done')
   expect(blocks.n, 'no Git block for a replay').to_be(0)
 end)
+
+-- A record whose JSON inside a SQL parameter is larger than one request (16000 quotes: 64000
+-- bytes) goes in pieces; its page is several batches in one transaction.
+local big_key = 'open/' .. part('alice') .. part('worktree-open/big')
+local function big_state()
+  local kv = kv_state()
+  kv.records[big_key] = {fingerprint = 'f-big', actor = 'alice', phase = 'ready',
+    request = {profile = 'task', args = {task = string.rep('"', 16000), note = string.rep('"', 1000) .. 'é'}}}
+  return kv
+end
+local function big_copied()
+  local r = json.decode(sql('SELECT record FROM reservations WHERE key = ?', {big_key})[1].record)
+  expect(r.request.args.task).to_be(string.rep('"', 16000))
+  expect(r.request.args.note).to_be(string.rep('"', 1000) .. 'é')
+end
+
+test('each hub.sql request of the import is at most 64 KiB; a large record is copied exactly', function()
+  local s = sandbox(big_state())
+  local sizes = {max = 0}
+  for _, action in ipairs({'hub.sql.batch', 'hub.sql.exec'}) do
+    s.hub_answers[action] = function(a)
+      local n = #json.encode({client_id = 'hub', action = action, args = a, timeout_ms = 10000})
+      if n > sizes.max then sizes.max = n end
+      return s.sql(action:sub(9), a)
+    end
+  end
+  s:tick()
+  expect(meta('kv_import')).to_be('done')
+  expect(sizes.max <= 65536, 'the largest request: ' .. sizes.max).to_be(true)
+  expect(s.transactions > 0, 'the page of the large record is one transaction').to_be(true)
+  big_copied()
+  expect(count('reservations')).to_be(4)
+end)
+
+test('a failure between the batches of a page rolls the page back; the retry copies it exactly', function()
+  local s = sandbox(big_state())
+  -- The second batch in a transaction fails once.
+  local state = {n = 0, failed = false}
+  s.hub_answers['hub.sql.batch'] = function(a)
+    if a.tx and not state.failed then
+      state.n = state.n + 1
+      if state.n == 2 then state.failed = true; return nil, 'stream response "c" failed: lost (status=503 code=unavailable)' end
+    end
+    return s.sql('batch', a)
+  end
+  s:tick()
+  expect(state.failed).to_be(true)
+  expect(meta('kv_import')).to_be(nil)
+  -- The page of open/ (with the large record) wrote nothing: the progress row is still at the start of open/.
+  expect(meta('kv_import_progress')).to_be('2:')
+  expect(count('reservations')).to_be(0)
+  expect(list(s).result ~= nil, 'the list answers after the retry').to_be(true)
+  expect(meta('kv_import')).to_be('done')
+  big_copied()
+  expect(count('reservations')).to_be(4)
+end)

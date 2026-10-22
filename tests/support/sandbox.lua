@@ -21,14 +21,37 @@ return function(plugin_dir, base, opts)
   local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, on_hub = {}, hub_answers = {}, rex_answers = {},
     agent = {principal = {kind = 'peer', pid = 4242}}}
   -- hub.sql runs on the plugin's database in the lab (the harness sql and sql_write), one statement
-  -- at a time: a batch is not atomic here, and a transaction token is accepted but isolates
-  -- nothing. sandbox() empties the tables first, so the import copies s.catalog at the first start.
+  -- at a time: a batch without a transaction is not atomic here. A transaction keeps its writes
+  -- until the commit (s.tx_writes), so a rollback, or a failure before the commit, writes nothing; a
+  -- query in it does not see them. sandbox() empties the tables first, so the import copies
+  -- s.catalog at the first start.
   local tables = {'repos', 'pending', 'ops', 'reservations', 'meta'}
   if not opts.keep then for _, t in ipairs(tables) do base.sql_write('DELETE FROM ' .. t) end end
+  s.transactions = 0
   local function sandbox_sql(action, a)
-    if action == 'begin' then return {tx = 'sandbox'} end
-    if action == 'commit' or action == 'rollback' then return {} end
+    if action == 'begin' then
+      s.transactions = s.transactions + 1
+      s.tx_writes = {}
+      return {tx = 'sandbox-' .. s.transactions}
+    end
+    if action == 'commit' then
+      local list = s.tx_writes or {}
+      s.tx_writes = nil
+      for _, st in ipairs(list) do base.sql_write(st.sql, st.params) end
+      return {}
+    end
+    if action == 'rollback' then s.tx_writes = nil; return {} end
     if action == 'replay' then return {found = false} end
+    if (action == 'exec' or action == 'batch') and a.tx then
+      if not s.tx_writes then error('tx_expired: no open transaction') end
+      local results = {}
+      for i, st in ipairs(a.statements or {{sql = a.sql, params = a.params}}) do
+        s.tx_writes[#s.tx_writes + 1] = st
+        results[i] = {changes = 1, id = 0}
+      end
+      if action == 'exec' then return results[1] end
+      return {results = results}
+    end
     if action == 'exec' then return base.sql_write(a.sql, a.params) end
     if action == 'batch' then
       local results = {}

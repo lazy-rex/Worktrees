@@ -230,3 +230,17 @@ test('tool: a title of 60 two-byte characters opens; 61 are refused', function()
   local e = expect_error(function() alice:call('worktree.open', {path = tree.path, title = title .. 'é', key = 'title-61'}) end)
   expect(e.code == 'bad_request' or e.code == 'invalid_input', 'refused: ' .. tostring(e.code)).to_be(true)
 end)
+
+-- An accepted request can be larger than one SQL request once its record is JSON inside a SQL
+-- parameter: 16000 quotes give 64000 bytes. The plugin writes the record in pieces.
+test('tool: a task of 16000 quotes opens; the intent keeps the exact text', function()
+  local task, note = string.rep('"', 16000), string.rep('"', 1000)
+  local result = open(alice, {path = tree.path, profile = 'task', args = {task = task, note = note}, key = 'quotes'})
+  expect(result.status).to_be('open')
+  local intent = W.intent('alice', 'worktree-open/quotes')
+  expect(intent.request.args.task).to_be(task)
+  expect(intent.request.args.note).to_be(note)
+  -- A same-key retry replays the intent: the same worker.
+  expect(open(alice, {path = tree.path, profile = 'task', args = {task = task, note = note}, key = 'quotes'}).spawn_id).to_be(result.spawn_id)
+  alice:hub('hub.stop', {spawn_id = result.spawn_id})
+end)

@@ -94,7 +94,7 @@ end
 -- main tree), the pending operations (the operation record as JSON), the saved operation results,
 -- the reservations of discard and open requests (each record as JSON), and the import state.
 -- Rex runs one handler at a time, and the hub fences an old instance, so a read and the writes
--- after it see no other writer. Each phase commit is one statement or one batch (all or nothing).
+-- after it see no other writer. Each phase commit is one write (all or nothing).
 local db, json = app.db, rex.json
 db.migrate {
   'CREATE TABLE repos (common TEXT PRIMARY KEY, repo TEXT NOT NULL)',
@@ -123,14 +123,78 @@ local function pending_op(id)
   local r = db.first('SELECT op FROM pending WHERE id = ?', id)
   return r and json.decode(r.op) or nil
 end
-local function put_pending(id, op) return {'INSERT OR REPLACE INTO pending (id, op) VALUES (?, ?)', id, json.encode(op)} end
+-- One request is at most 64 KiB (a reply is at most about 1 MB, so a read needs no pieces). A
+-- record that a caller sent can be larger once it is JSON inside a SQL parameter (an open request
+-- of 16000 quotes gives 64000 bytes). So put writes the last column of a row in pieces of at most
+-- piece_bytes of encoded JSON, at UTF-8 character boundaries: the INSERT has the first piece, and an
+-- UPDATE appends each next piece. write sends batches of at most batch_bytes; more than one batch
+-- runs in one transaction, so no read sees a part of a row.
+local piece_bytes, batch_bytes = 16384, 49152
+-- back moves j back to the end of a UTF-8 character (never before i).
+local function back(text, i, j)
+  while j > i and j < #text and text:byte(j + 1) >= 0x80 and text:byte(j + 1) < 0xC0 do j = j - 1 end
+  return j
+end
+local function pieces(text)
+  local out, i = {}, 1
+  repeat
+    local j = back(text, i, math.min(#text, i + 8191))
+    while j > i and #json.encode(text:sub(i, j)) > piece_bytes do j = back(text, i, i + math.floor((j - i) / 2)) end
+    out[#out + 1] = text:sub(i, j)
+    i = j + 1
+  until i > #text
+  return out
+end
+-- put gives the statements that write one row: verb (INSERT or INSERT OR REPLACE), the table, the
+-- columns (the key first, the long text last) and their values.
+local function put(verb, t, columns, values)
+  local list = pieces(values[#values])
+  local first = {}
+  for i = 1, #values - 1 do first[i] = values[i] end
+  first[#values] = list[1]
+  local marks = string.rep('?, ', #columns - 1) .. '?'
+  local out = {{verb .. ' INTO ' .. t .. ' (' .. table.concat(columns, ', ') .. ') VALUES (' .. marks .. ')', unpack(first)}}
+  local last = columns[#columns]
+  for i = 2, #list do
+    out[#out + 1] = {'UPDATE ' .. t .. ' SET ' .. last .. ' = ' .. last .. ' || ? WHERE ' .. columns[1] .. ' = ?', list[i], values[1]}
+  end
+  return out
+end
+-- batches splits statements into batches of at most batch_bytes, measured as the SDK sends each
+-- statement ({sql, params}) with its comma. The rest of the request (the action, the client and
+-- transaction IDs) fits in the other 16 KiB.
+local function batches(statements)
+  local out, batch, size = {}, {}, 0
+  for _, s in ipairs(statements) do
+    local n = #json.encode({sql = s[1], params = {unpack(s, 2)}}) + 1
+    if #batch > 0 and size + n > batch_bytes then out[#out + 1] = batch; batch, size = {}, 0 end
+    batch[#batch + 1] = s
+    size = size + n
+  end
+  if #batch > 0 then out[#out + 1] = batch end
+  return out
+end
+-- write commits lists of statements (each argument is a list) as one unit.
+local function write(...)
+  local statements = {}
+  for _, list in ipairs({...}) do
+    for _, s in ipairs(list) do statements[#statements + 1] = s end
+  end
+  local list = batches(statements)
+  if #list <= 1 then
+    if list[1] then db.batch(list[1]) end
+    return
+  end
+  db.transaction(function() for _, batch in ipairs(list) do db.batch(batch) end end)
+end
+local function put_pending(id, op) return put('INSERT OR REPLACE', 'pending', {'id', 'op'}, {id, json.encode(op)}) end
 local function saved_op(key)
   local r = db.first('SELECT fingerprint, result FROM ops WHERE key = ?', key)
   if not r then return {found = false} end
   return {found = true, fingerprint = r.fingerprint, result = json.decode(r.result)}
 end
 local function save_op(key, fingerprint, result)
-  return {'INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', key, fingerprint, json.encode(result)}
+  return put('INSERT', 'ops', {'key', 'fingerprint', 'result'}, {key, fingerprint, json.encode(result)})
 end
 -- reservation gives the record of the first key of keys that has one (the keys of the caller's aliases).
 local function reservation(keys)
@@ -139,7 +203,8 @@ local function reservation(keys)
     if r then return json.decode(r.record), key end
   end
 end
-local function put_reservation(key, record) db.exec('INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(record)) end
+local function reservation_row(key, record) return put('INSERT OR REPLACE', 'reservations', {'key', 'record'}, {key, json.encode(record)}) end
+local function put_reservation(key, record) write(reservation_row(key, record)) end
 -- A caller is the user (the view path) or an agent (the SDK ctx). aliases are the agent ID and its
 -- legacy IDs (ctx.aliases) after an identity migration, current first. An operation ID is part(actor)..part(key).
 local user_caller = {agent = 'user', aliases = {'user'}, user = true}
@@ -184,7 +249,7 @@ local function mutation(id, op, args)
     op.phase = 'sending'
     op.session = plugin_session
     op.label = 'lazyrex-worktree:' .. app.instance_id .. ':' .. lazyrex.fingerprint(id)
-    db.exec(unpack(put_pending(id, op)))
+    write(put_pending(id, op))
     local command = {'/usr/bin/env'}
     for name in pairs(git_env) do command[#command + 1] = '-u'; command[#command + 1] = name end
     command[#command + 1] = 'git'; command[#command + 1] = '--git-dir'; command[#command + 1] = op.common
@@ -193,7 +258,7 @@ local function mutation(id, op, args)
       flavor = 'com.superlogical.terminal.shell', label = op.label,
       options = {command = command, cwd = op.repo, login = false, exit = {on_completion = false}}})
     op.block = created.block_id
-    db.exec(unpack(put_pending(id, op)))
+    write(put_pending(id, op))
   end
   local blocks, gone = operation_blocks(op)
   if gone then return {missing = true} end
@@ -209,7 +274,7 @@ local function mutation(id, op, args)
       end
     end
     if not op.block then fail('unresolved', 'The Git process has an unknown start result; a late Rex reply can still create its block') end
-    db.exec(unpack(put_pending(id, op)))
+    write(put_pending(id, op))
   end
   local process = rex_ok('com.superlogical.terminal.process', {session_id = op.session, block_id = op.block, args = {}})
   if process.child or not process.last_exit then return nil end
@@ -244,7 +309,7 @@ end
 local function finish(id, op, result)
   if result.error then result.error.message = tail(result.error.message) end
   op.phase = 'cleanup'
-  db.batch({put_pending(id, op), save_op(id, op.fingerprint, result)})
+  write(put_pending(id, op), save_op(id, op.fingerprint, result))
   cleanup_done(id)
   if result.error then fail(result.error.code, result.error.message) end
   return result
@@ -255,7 +320,7 @@ local function admit(id, op)
       fail('conflict', 'Another operation owns this path; retry that operation first')
     end
   end
-  db.batch({{'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', op.common, op.repo}, put_pending(id, op)})
+  write({{'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', op.common, op.repo}}, put_pending(id, op))
 end
 local function prepare_parent(path)
   if not within(path, root) then fail('refused', 'The path is outside the worktree root') end
@@ -807,9 +872,9 @@ local function forget(caller, args, shown)
     result.unattributed_workers = {}
     for i = 1, math.min(#unattributed, 20) do result.unattributed_workers[i] = cut(unattributed[i]) end
   end
-  local statements = {save_op(part(caller.agent) .. part(key), fingerprint, result)}
+  local statements = save_op(part(caller.agent) .. part(key), fingerprint, result)
   for _, common in ipairs(commons) do statements[#statements + 1] = {'DELETE FROM repos WHERE common = ?', common} end
-  db.batch(statements)
+  write(statements)
   forget_cached(repo)
   return result
 end
@@ -1609,28 +1674,29 @@ local actions = {
 -- or the next start ends it). The state is a table field, not an upvalue that a closure writes.
 -- The import (docs/sdk-port.md, section 3) copies the records of the hub.store version once, in
 -- pages: the catalog record, the open/ and discard/ reservations, then every saved operation result
--- (also one that no pending operation names: else its key could run again). The last batch of a
--- page writes the progress row (the source and its cursor), so a restart goes on from there. Each
--- copy is an INSERT OR REPLACE, so a page that commits again gives the same rows. Only the row
+-- (also one that no pending operation names: else its key could run again). Each page is one write
+-- with its progress row (the source and its cursor), so a page commits whole or not at all, and a
+-- restart goes on after the last page that committed. A page of hub.store.scan or
+-- hub.store.ops_scan is at most 512 KiB of records, so its write is a few batches. Each copy is an
+-- INSERT OR REPLACE, so a page that commits again gives the same rows. Only the row
 -- kv_import = done ends the import: empty tables are valid after Forget. The hub.store records
 -- stay as they are.
 local import_sources = {'catalog', 'open/', 'discard/', 'ops'}
--- A batch holds at most 48 KiB of encoded statements: one request is at most 64 KiB.
-local batch_bytes = 49152
 -- import_page gives the copy statements of one page of a source, and the cursor of the next page.
 local function import_page(source, cursor)
   local out, after = {}, cursor ~= '' and cursor or nil
+  local function add(list) for _, s in ipairs(list) do out[#out + 1] = s end end
   if source == 'catalog' then
     local r = hub('hub.store.get', {keys = {'catalog'}}).records.catalog
     local value = r and r.value or {}
     for common, repo in pairs(value.repos or {}) do out[#out + 1] = {'INSERT OR REPLACE INTO repos (common, repo) VALUES (?, ?)', common, repo} end
-    for id, op in pairs(value.pending or {}) do out[#out + 1] = put_pending(id, op) end
+    for id, op in pairs(value.pending or {}) do add(put_pending(id, op)) end
     return out, nil
   end
   if source == 'ops' then
     local page = hub('hub.store.ops_scan', {after = after})
     for _, op in ipairs(page.ops or {}) do
-      out[#out + 1] = {'INSERT OR REPLACE INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', op.key, op.fingerprint or '', json.encode(op.result)}
+      add(put('INSERT OR REPLACE', 'ops', {'key', 'fingerprint', 'result'}, {op.key, op.fingerprint or '', json.encode(op.result)}))
     end
     return out, page.next
   end
@@ -1638,22 +1704,8 @@ local function import_page(source, cursor)
   local keys = {}
   for key in pairs(page.records or {}) do keys[#keys + 1] = key end
   table.sort(keys)
-  for _, key in ipairs(keys) do
-    out[#out + 1] = {'INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(page.records[key].value)}
-  end
+  for _, key in ipairs(keys) do add(reservation_row(key, page.records[key].value)) end
   return out, page.next
-end
--- import_commit commits statements in batches; the last batch also has the rows of last.
-local function import_commit(statements, last)
-  local batch, size = {}, 0
-  for _, s in ipairs(statements) do
-    local n = #json.encode(s)
-    if #batch > 0 and size + n > batch_bytes then db.batch(batch); batch, size = {}, 0 end
-    batch[#batch + 1] = s
-    size = size + n
-  end
-  for _, s in ipairs(last) do batch[#batch + 1] = s end
-  db.batch(batch)
 end
 local function import()
   if db.first("SELECT value FROM meta WHERE name = 'kv_import'") then imported.done = true; return end
@@ -1668,7 +1720,7 @@ local function import()
     if next_cursor then cursor = next_cursor else source, cursor = source + 1, '' end
     local last = {{'INSERT OR REPLACE INTO meta (name, value) VALUES (?, ?)', 'kv_import_progress', source .. ':' .. cursor}}
     if source > #import_sources then last[2] = {"INSERT INTO meta (name, value) VALUES ('kv_import', 'done')"} end
-    import_commit(statements, last)
+    write(statements, last)
   end
   imported.done = true
 end
