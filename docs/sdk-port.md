@@ -62,7 +62,8 @@ the progress row `meta(name = 'kv_import_progress')` with the source and the cur
 example `ops:<last key>`); the move to the next source writes the new source with an empty cursor. A
 restart resumes from that row. A page can be larger than one SQL request (64 KiB; the catalog
 is one record): the import splits it into batches that each fit the encoded limit, and moves the
-cursor of the source only in the batch that commits the last rows of that page. The last batch writes `meta(name = 'kv_import', value = 'done')` with
+cursor of the source only in the batch that commits the last rows of that page. Every copy is an
+`INSERT OR REPLACE` by primary key, so a page that a restart copies again gives the same rows. The last batch writes `meta(name = 'kv_import', value = 'done')` with
 the last page. Only the done row says that the import is complete: empty `repos` and `pending` are
 valid after Forget, so they never start an import. Every saved result moves, also a completed
 operation that no pending entry or reservation names; else its key could run again.
