@@ -289,6 +289,8 @@ test('list: operations shows every pending entry; a legacy entry has no actor; r
   expect(seen[mine].actor).to_be('alice')
   expect(seen[mine].kind).to_be('create')
   expect(seen['legacy-id'].actor).to_be(nil)
+  -- No admission time is invented for a record from an older version.
+  expect(seen['legacy-id'].created_at).to_be(nil)
   expect(seen['legacy-id'].kind).to_be('create')
   -- repo filters only worktrees: another repository lists the same operations.
   local other = W.repo('discard-other')

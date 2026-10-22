@@ -144,3 +144,23 @@ test('saved results replay after a restart: create, open and remove', function()
   for _, it in ipairs(node(tree, 'worktrees').items) do if (it.detail or ''):find(repo, 1, true) or it.id == repo then shows = true end end
   expect(shows, 'the panel lists the repository').to_be(true)
 end)
+
+-- created_at is the admission time of a pending operation (RFC 3339 UTC). The first call of a
+-- remove admits it and starts its status check, so the call returns running. After a crash restart
+-- the check is gone: the first same-key retry starts it again and returns running too. The time
+-- stays the same through both.
+test('a pending remove keeps its admission time across a retry and a crash restart', function()
+  local t = create('age-create', 'age/one')
+  local function listed()
+    for _, e in ipairs(alice:call('worktree.list', {}).operations or {}) do if e.id == id('age-remove') then return e end end
+  end
+  expect(alice:call('worktree.remove', {path = t.path, key = 'age-remove'}).status).to_be('running')
+  local at = listed().created_at
+  expect(at).to_match('^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$')
+  hub:restart({crash = true})
+  expect(listed().created_at).to_be(at)
+  expect(alice:call('worktree.remove', {path = t.path, key = 'age-remove'}).status).to_be('running')
+  expect(listed().created_at).to_be(at)
+  expect(settle(function() return alice:call('worktree.remove', {path = t.path, key = 'age-remove'}) end).removed).to_be(true)
+  expect(listed()).to_be(nil)
+end)

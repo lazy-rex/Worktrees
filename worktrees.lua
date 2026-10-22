@@ -340,7 +340,10 @@ local function finish(id, op, result)
   if result.error then fail(result.error.code, result.error.message) end
   return result
 end
+-- admit records the operation and its admission time (created_at, RFC 3339 UTC). The time is set
+-- once: every later write keeps it. A record from an older version has none, and none is invented.
 local function admit(id, op)
+  op.created_at = os.date('!%Y-%m-%dT%H:%M:%SZ')
   for other, pending in pairs(catalog().pending) do
     if other ~= id and (pending.path == op.path or within(pending.path, op.path) or within(op.path, pending.path)) then
       fail('conflict', 'Another operation owns this path; retry that operation first')
@@ -718,8 +721,8 @@ local function operations_page(after)
   table.sort(ids)
   local out, more = page(ids, function(id)
     local op = pending[id]
-    -- A pending row from an older version can have no actor: the field is left out.
-    return {id = id, kind = op.kind, phase = op.phase, path = op.path, branch = op.branch, actor = op.actor}
+    -- A pending row from an older version can have no actor or created_at: the field is left out.
+    return {id = id, kind = op.kind, phase = op.phase, path = op.path, branch = op.branch, actor = op.actor, created_at = op.created_at}
   end, {function(e) return {id = e.id, kind = e.kind, phase = e.phase, compact = true} end}, operations_bytes, 'pending operation')
   return out, more and out[#out].id or nil
 end
@@ -1669,7 +1672,7 @@ local actions = {
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>-<id>/<branch> (id: 6 hex digits from the Git directory path), or return the linked tree of the branch that already exists under that root, also at an older path. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result: retry from the same caller with the same key and unchanged arguments until the result is not running. The first retry after a plugin restart can return running.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', title = 'List worktrees',
-    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',
+    description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known, created_at: the admission time as RFC 3339 UTC text, absent for an operation admitted before this version), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',
     args = {type = 'object', properties = {repo = {type = 'string'}, worktrees_after = {type = 'string', minLength = 1}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry: retry from the same caller with the same key and unchanged arguments until the result is not running. The first retry after a plugin restart can return running. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
