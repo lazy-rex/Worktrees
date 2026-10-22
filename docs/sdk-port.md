@@ -112,3 +112,14 @@ sweep and the routes in `lazyrex.json` stay. Line counts before and after go in 
 - G11. Phase commits (reviewer): a `{tx = false}` action that persists an intent before external work
   needs an atomic commit of several statements (for example `app.db.tx(fn)`), or a supported
   alternative. The import needs the same, and a restart-safe mark that it is complete.
+
+## 7. Answers (hub lead, hub.sql handoff, 2026-10-22; proposed, not yet implemented)
+
+- G11: `hub.sql.batch {statements}` without `tx` is one all-or-nothing transaction; it works from any
+  code. Each phase commit (before an external effect; the result with the cleanup phase) is one batch.
+- G3: a hub.sql error message starts with its code (`"<code>: <text>"`); the SDK keeps the code.
+- G2: non-SQL state uses `hub.ui.invalidate` and explicit render deps (hub branch hub/render-deps-r1).
+- G6: `begin`, `commit` and `batch` work from timers, events and start code.
+- G4: the hub saves a reply only for a commit with `key`; Worktrees uses `store = false`.
+- G7: raw hub calls (`app.hub`), also `hub.store.*` during the port.
+- Open: G8 (KV key listing for the import); G1, G5, G9 and G10 are SDK surfaces (claude-22).
