@@ -1397,33 +1397,6 @@ local function new_fields(context)
     {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
     {id = 'base', label = 'Base (optional, for a new branch)', kind = 'text', value = ''}}
 end
--- Without a path, the remove form is a picker. With a path, it confirms that one tree, so the
--- advice always belongs to the tree that the submit removes.
-local function render_remove(context, path)
-  if not path then
-    local items = {}
-    for _, tree in ipairs(trees_for(repo_default(context))) do
-      if removable(tree) then items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree), action = {name = 'select', label = 'Choose', enabled = true, user_only = 'navigation'}} end
-    end
-    if #items == 0 then
-      return {title = 'Remove worktree', nodes = {{id = 'none', type = 'widget', text = 'No managed worktree can be removed.'}, cancel_node()}}
-    end
-    return {title = 'Remove worktree', nodes = {{id = 'remove_pick', type = 'list', label = 'Choose a worktree', items = items}, cancel_node()}}
-  end
-  local tree = find_known(path)
-  if not tree or not removable(tree) then fail('invalid_input', 'This worktree cannot be removed') end
-  local nodes = {
-    {id = 'about', type = 'widget', text = tree_detail(tree)},
-    {id = 'remove_worktree', type = 'form', fields = {
-      {id = 'path', label = 'Worktree', kind = 'select', required = true, value = path, options = {{value = path, label = tree.branch}}}},
-      submit_action = {name = 'submit', label = 'Remove worktree', enabled = true, tool = 'worktree.remove'}}}
-  local advice = remove_advice(path)
-  if not advice then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Checking the worktree…'}
-  elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. join(advice.reasons or {}, '\n')} end
-  nodes[#nodes + 1] = {id = 'help', type = 'widget', text = 'Removal never forces and never deletes the branch.'}
-  nodes[#nodes + 1] = cancel_node()
-  return {title = 'Remove ' .. tree.branch, nodes = nodes}
-end
 -- Only these errors are definite. Every other error (unavailable, timeout, an unknown outcome)
 -- goes back to view_ops unchanged, so it retries the same key.
 local definite = {invalid_input = true, refused = true, not_found = true, open_failed = true}
@@ -1467,7 +1440,6 @@ local function ui_render(args)
   elseif base:match('^/forms/worktrees%-more%?') or base == '/forms/worktrees-more' then
     tree = render_more(context, more_start(base:match('^/forms/worktrees%-more%?start=(.*)$')))
   elseif base == '/forms/worktree' then tree = render_tree_menu(path)
-  elseif base == '/forms/remove-worktree' then tree = render_remove(context, path)
   elseif base == '/forms/forget-repository' then tree = render_forget(path)
   elseif base == '/forms/worktree-agent' then tree = render_profiles(path)
   elseif base:sub(1, 22) == '/forms/worktree-agent/' then tree = render_agent(base:sub(23), path)
@@ -1643,10 +1615,6 @@ local function ui_action(args)
     if input.item_id == 'open_tab' or input.item_id == 'open_session' then
       return open_effect(open_menu(args, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
     end
-  elseif base == '/forms/remove-worktree' and not path and args.node_id == 'remove_pick' and args.action == 'select' and type(input.item_id) == 'string' then
-    return {form = route_with_path('/forms/remove-worktree', input.item_id)}
-  elseif base == '/forms/remove-worktree' and args.node_id == 'remove_worktree' and args.action == 'submit' then
-    return submit_worktree(args)
   elseif base == '/forms/forget-repository' and args.node_id == 'forget_repository' and args.action == 'submit' then
     local values = type(args.input) == 'table' and args.input.values or nil
     if type(values) ~= 'table' then fail('invalid_input', 'Forget form values are required') end
@@ -1827,6 +1795,68 @@ app.form('/forms/new-worktree', {id = 'new_worktree', title = 'New worktree', tx
   after = {{id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>-<id>/<branch>. The ID is 6 hex digits from the Git directory path. An existing tree of the branch in this root is used.'}},
   submit = {label = 'Create worktree', tool = 'worktree.create'},
   on_submit = function(ctx) return new_worktree_submit(ctx.args) end})
+-- Remove (app.form). Without a path, the form is a picker. With a path, it
+-- confirms that one tree, so the advice always belongs to the tree that the submit removes. The SDK
+-- runs the title, the nodes and the fields again at the submit, before the submit code: they never
+-- fail on the state of the tree, so a same-key retry after the tree is gone replays the saved
+-- result. A tree that cannot be removed shows a notice; the remove refuses it.
+local function remove_target(ctx)
+  ready()
+  local _, path = route_path(ctx.route)
+  local tree = path and find_known(path)
+  return path, tree and removable(tree) and tree or nil
+end
+local remove_form = {id = 'remove_worktree', tx = false, store = false,
+  title = function(ctx) local _, tree = remove_target(ctx); return tree and ('Remove ' .. tree.branch) or 'Remove worktree' end,
+  intro = function(ctx)
+    local path, tree = remove_target(ctx)
+    if not path then return {} end
+    return {{id = 'about', type = 'widget', text = tree and tree_detail(tree) or ('This worktree cannot be removed: ' .. path)}}
+  end,
+  instead = function(ctx)
+    local path = remove_target(ctx)
+    if path then return nil end
+    local items = {}
+    for _, tree in ipairs(trees_for(repo_default(ctx.context))) do
+      if removable(tree) then
+        items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree), action_label = 'Choose',
+          on_select = function() return {form = route_with_path('/forms/remove-worktree', tree.path)} end}
+      end
+    end
+    -- The picker only navigates, as before app.form: a click on a tree that the list no longer has
+    -- (the list changed after the render) still opens its confirmation, which checks the tree.
+    local clicked = ctx.input and ctx.input.item_id
+    if type(clicked) == 'string' and clicked:sub(1, 1) == '/' then
+      local listed = false
+      for _, item in ipairs(items) do if item.id == clicked then listed = true end end
+      if not listed then
+        items[#items + 1] = {id = clicked, label = clicked, action_label = 'Choose',
+          on_select = function() return {form = route_with_path('/forms/remove-worktree', clicked)} end}
+      end
+    end
+    if #items == 0 then return {nodes = {{id = 'none', type = 'widget', text = 'No managed worktree can be removed.'}}} end
+    return {nodes = {{id = 'remove_pick', type = 'list', label = 'Choose a worktree', items = items}}}
+  end,
+  fields = function(ctx)
+    local path, tree = remove_target(ctx)
+    return {{id = 'path', label = 'Worktree', kind = 'select', required = true, value = path, check = false,
+      options = {{value = path, label = tree and tree.branch or path}}}}
+  end,
+  after = function(ctx)
+    local path, tree = remove_target(ctx)
+    if not path then return {} end
+    local nodes = {}
+    if tree then
+      local advice = remove_advice(path)
+      if not advice then nodes[1] = {id = 'check', type = 'widget', text = 'Checking the worktree…'}
+      elseif not advice.ok then nodes[1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. join(advice.reasons or {}, '\n')} end
+    end
+    nodes[#nodes + 1] = {id = 'help', type = 'widget', text = 'Removal never forces and never deletes the branch.'}
+    return nodes
+  end,
+  submit = {label = 'Remove worktree', tool = 'worktree.remove'},
+  on_submit = function(ctx) return submit_worktree(ctx.args) end}
+app.form('/forms/remove-worktree', remove_form)
 app.view('/forms/*', views, raw)
 app.on('hub.changed', started(function(args) if args.what == 'workers' then notify('workers') end end), raw)
 app.on('view.seen', started(function(args) if args.reason == 'focus' then notify('always') end end), raw)
