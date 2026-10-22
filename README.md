@@ -10,8 +10,8 @@ directory, so two repositories with the same name usually get different trees. T
 paths can still get the same ID. If the target path already contains another repository or branch,
 create fails with `conflict` instead of reusing that tree.
 
-Before it makes a tree, create looks for a linked tree of the branch inside the root, also at an
-older path (`<root>/<name>/<branch>`). If Git lists one, create returns it with `created = false`.
+Before it makes a tree, create looks for a linked tree of the branch inside the root, at any path:
+Git checks a branch out in at most one tree. If Git lists one, create returns it with `created = false`.
 The main tree of a repository is never returned this way. If the listed tree's directory is missing,
 create is refused: repair or prune the Git entry first. A tree of the branch outside the root is not
 returned: `git worktree add` fails with `git_error`.

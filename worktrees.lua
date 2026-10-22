@@ -413,8 +413,9 @@ local function create(caller, id, fingerprint, args, pending)
     end
     local name = info.repo:match('([^/]+)$')
     if not name then fail('invalid_input', 'The repository needs a directory name') end
-    -- A linked tree of the branch inside the root is the requested tree, also at an older path
-    -- layout. The main tree is never one (decision "New worktree paths carry a short repository ID").
+    -- A linked tree of the branch inside the root, at any path, is the requested tree: Git checks a
+    -- branch out in at most one tree. The main tree is never one (decision "New worktree paths carry
+    -- a short repository ID").
     local listed
     for i, tree in ipairs(trees(info.common)) do
       if i > 1 and not tree.bare and tree.branch == branch and within(tree.path, root) then listed = tree.path end
@@ -1702,7 +1703,7 @@ end
 
 local actions = {
   {name = 'worktree.create', title = 'Create a worktree',
-    description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>-<id>/<branch> (id: 6 hex digits from the Git directory path), or return the linked tree of the branch that already exists under that root, also at an older path. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result. Retry from the same caller, with the same key and unchanged arguments, until the result is not running. The first retry after a plugin restart can return running.',
+    description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>-<id>/<branch> (id: 6 hex digits from the Git directory path), or return the linked tree of the branch that already exists under that root, at any path. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result. Retry from the same caller, with the same key and unchanged arguments, until the result is not running. The first retry after a plugin restart can return running.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
   {name = 'worktree.list', title = 'List worktrees',
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known, created_at: the admission time as RFC 3339 UTC text, absent for an operation admitted before this version), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',

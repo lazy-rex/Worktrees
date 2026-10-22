@@ -1,7 +1,7 @@
 -- Tree paths (decision "New worktree paths carry a short repository ID"): a new tree goes in
 -- <root>/<name>-<id>/<branch>, with a 6-hex ID from the common Git directory path. A linked tree of
--- the branch inside the root is the requested tree, also at an older path. The main tree is never
--- reused. A listed tree with a missing directory is refused.
+-- the branch inside the root, at any path, is the requested tree: Git checks a branch out in at most
+-- one tree. The main tree is never reused. A listed tree with a missing directory is refused.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local alice = agent('alice')
 
@@ -52,16 +52,17 @@ test('two repositories with the same directory name and the same branch get diff
   expect(W.git(b.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')).to_contain('/two/app/.git')
 end)
 
-test('a linked tree of the branch at the old path layout is found; Git starts no worktree add', function()
-  local repo = W.repo('legacy')
-  local old = W.root .. '/legacy/old'
-  W.run({'mkdir', '-p', W.root .. '/legacy'})
-  W.git(repo, 'worktree', 'add', '-q', '-b', 'old', old)
+test('a linked tree of the branch at another path inside the root is returned; Git starts no worktree add', function()
+  -- Git checks a branch out in at most one tree, so that tree is the requested tree.
+  local repo = W.repo('elsewhere')
+  local other = W.root .. '/elsewhere/moved'
+  W.run({'mkdir', '-p', W.root .. '/elsewhere'})
+  W.git(repo, 'worktree', 'add', '-q', '-b', 'moved', other)
   local before = adds()
-  local r = create(repo, 'old', 'legacy-old')
-  expect(r).to_equal({path = old, repo = repo, branch = 'old', created = false})
+  local r = create(repo, 'moved', 'elsewhere-moved')
+  expect(r).to_equal({path = other, repo = repo, branch = 'moved', created = false})
   expect(adds(), 'no git worktree add').to_be(before)
-  expect(exists(W.tree_path(repo, 'old')), 'no tree at the new path').to_be(false)
+  expect(exists(W.tree_path(repo, 'moved')), 'no tree at the path that create gives a new tree').to_be(false)
 end)
 
 test('the main tree is never reused, also inside the root', function()
@@ -77,18 +78,18 @@ test('a listed tree with a missing directory is refused, also when it is locked;
   local repo = W.repo('stale')
   W.run({'mkdir', '-p', W.root .. '/stale'})
   for _, branch in ipairs({'gone', 'held'}) do
-    local old = W.root .. '/stale/' .. branch
-    W.git(repo, 'worktree', 'add', '-q', '-b', branch, old)
-    if branch == 'held' then W.git(repo, 'worktree', 'lock', old) end
-    W.run({'rm', '-rf', old})
+    local listed = W.root .. '/stale/' .. branch
+    W.git(repo, 'worktree', 'add', '-q', '-b', branch, listed)
+    if branch == 'held' then W.git(repo, 'worktree', 'lock', listed) end
+    W.run({'rm', '-rf', listed})
     local rev, pending, before = W.records(), pending_count(), adds()
     local err = expect_error(function() create(repo, branch, 'stale-' .. branch) end, 'refused')
-    expect(err.message).to_contain(old)
+    expect(err.message).to_contain(listed)
     expect(err.message).to_contain('missing')
     expect(adds(), 'no git worktree add').to_be(before)
     expect(pending_count(), 'no pending operation').to_be(pending)
     expect(W.records(), 'no catalog write').to_be(rev)
-    expect(exists(old), 'no tree at the old path').to_be(false)
+    expect(exists(listed), 'no tree at the listed path').to_be(false)
     expect(exists(W.tree_path(repo, branch)), 'no tree at the new path').to_be(false)
   end
 end)
