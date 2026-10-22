@@ -60,7 +60,9 @@ Import (once, in the start hook), in pages. The sources, in this order, each wit
 operation result (hub lead, to be added on hub/sql). Each `hub.sql.batch` copies one page and writes
 the progress row `meta(name = 'kv_import_progress')` with the source and the cursor together (for
 example `ops:<last key>`); the move to the next source writes the new source with an empty cursor. A
-restart resumes from that row. The last batch writes `meta(name = 'kv_import', value = 'done')` with
+restart resumes from that row. A page can be larger than one SQL request (64 KiB; the catalog
+is one record): the import splits it into batches that each fit the encoded limit, and moves the
+cursor of the source only in the batch that commits the last rows of that page. The last batch writes `meta(name = 'kv_import', value = 'done')` with
 the last page. Only the done row says that the import is complete: empty `repos` and `pending` are
 valid after Forget, so they never start an import. Every saved result moves, also a completed
 operation that no pending entry or reservation names; else its key could run again.
@@ -72,7 +74,7 @@ source stays stable during the import.
 
 Rollback: before the done row, no SQL-era write exists (the plugin is inactive), so a rollback to
 the KV plugin is safe only after a reset: with the hub stopped, delete the plugin's SQL file
-(`<state>/sql/worktrees.db`). Without that reset, the KV plugin can change the source, and a later SQL
+(`<state>/sql/worktrees.db` and its `-wal` and `-shm` files, as one database). Without that reset, the KV plugin can change the source, and a later SQL
 start would resume stale progress; so a rollback without the reset is not supported. After the done
 row, the SQL tables are the only current state: the KV records stay as a copy of the old state, and
 a rollback to the KV plugin would lose every later SQL write. The plan has no dual writes and no
