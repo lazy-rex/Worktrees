@@ -279,23 +279,24 @@ local function clear_pending()
   W.set_catalog(state)
 end
 
-test('list: operations shows every pending entry; a legacy entry has no actor; repo does not filter it', function()
+test('list: operations shows every pending entry with its actor and admission time; repo does not filter it', function()
   clear_pending()
   local mine = stopped('alice', 'list-1')
   local state = W.catalog()
-  state.pending['legacy-id'] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/legacy', branch = 'legacy', repo = repo, common = common}
+  local theirs = W.part('bob') .. W.part('list-2')
+  state.pending[theirs] = {kind = 'create', phase = 'prepared', path = W.root .. '/discard/theirs', branch = 'theirs', repo = repo, common = common,
+    actor = 'bob', created_at = '2026-10-22T00:00:00Z'}
   W.set_catalog(state)
   local seen = all_pages(alice, {repo = repo})
   expect(seen[mine].actor).to_be('alice')
   expect(seen[mine].kind).to_be('create')
-  expect(seen['legacy-id'].actor).to_be(nil)
-  -- No admission time is invented for a record from an older version.
-  expect(seen['legacy-id'].created_at).to_be(nil)
-  expect(seen['legacy-id'].kind).to_be('create')
+  expect(seen[theirs].actor).to_be('bob')
+  expect(seen[theirs].created_at).to_be('2026-10-22T00:00:00Z')
+  expect(seen[theirs].kind).to_be('create')
   -- repo filters only worktrees: another repository lists the same operations.
   local other = W.repo('discard-other')
   local again = all_pages(alice, {repo = other})
-  expect(again[mine] ~= nil and again['legacy-id'] ~= nil).to_be(true)
+  expect(again[mine] ~= nil and again[theirs] ~= nil).to_be(true)
   clear_pending()
 end)
 

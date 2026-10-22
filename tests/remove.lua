@@ -72,18 +72,19 @@ test("the safety checks stay for another agent's tree", function()
   expect(exists(t.path)).to_be(false)
 end)
 
-test('a pending create from an older version (no actor) completes; any agent removes the tree', function()
-  local branch, key = 'rm/old-op', 'old-op'
+test('a pending create in phase prepared completes on its retry; another agent removes the tree', function()
+  local branch, key = 'rm/prepared-op', 'prepared-op'
   local path = W.root .. '/remove/' .. branch
   local common = W.real(repo .. '/.git')
   local state = W.catalog()
   state.pending[W.part('alice') .. W.part(key)] = {kind = 'create', fingerprint = 'create/' .. W.part(repo) .. W.part(branch) .. W.part(''),
-    repo = repo, common = common, path = path, branch = branch, commit = W.git(repo, 'rev-parse', 'HEAD'), created = true, phase = 'prepared'}
+    repo = repo, common = common, path = path, branch = branch, commit = W.git(repo, 'rev-parse', 'HEAD'), created = true, phase = 'prepared',
+    actor = 'alice', created_at = '2026-10-22T00:00:00Z'}
   W.set_catalog(state)
   local t = create(alice, branch, key)
   expect(t.created).to_be(true)
   expect(exists(path)).to_be(true)
-  expect(remove(bob, path, 'bob-rm-old-op').removed).to_be(true)
+  expect(remove(bob, path, 'bob-rm-prepared-op').removed).to_be(true)
 end)
 
 test('after an identity migration the agent replays the keys of its legacy ID', function()
