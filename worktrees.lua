@@ -1389,7 +1389,9 @@ local function new_fields(context)
   for _, repo in ipairs(recorded_repos()) do
     if not seen[repo] then options[#options + 1] = {value = repo, label = repo}; seen[repo] = true end
   end
-  local repo_field = #options > 0 and {id = 'repo', label = 'Repository', kind = 'select', required = true, value = options[1].value, options = options}
+  -- check = false: the options can change between the render and the submit (another caller
+  -- records a repository). The submit takes the shown value; the create checks the repository.
+  local repo_field = #options > 0 and {id = 'repo', label = 'Repository', kind = 'select', required = true, value = options[1].value, options = options, check = false}
     or {id = 'repo', label = 'Repository (absolute path)', kind = 'text', required = true, value = ''}
   return {repo_field,
     {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
