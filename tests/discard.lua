@@ -261,7 +261,7 @@ local function all_pages(who, args)
     local ops = r.operations or {}
     expect(#ops > 0 or r.operations_next == nil, 'no empty page before the end').to_be(true)
     expect(#ops <= 50).to_be(true)
-    expect(#rex.json.encode(ops) <= 32768, 'the page is within 32 KiB').to_be(true)
+    expect(#rex.json.encode(ops) <= 24576, 'the page is within 24 KiB').to_be(true)
     for _, e in ipairs(ops) do
       expect(seen[e.id], 'no duplicate ' .. e.id).to_be(nil)
       if order[#order] then expect(e.id > order[#order], 'sorted by id').to_be(true) end
