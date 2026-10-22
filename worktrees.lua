@@ -1754,6 +1754,22 @@ local function start()
   refresh_safe()
 end
 local function started(fn) return function(ctx, args) start(); return fn(ctx, args) end end
+-- A render cannot write (SDK eb9654d), and start() writes: the import and the cleanup of finished
+-- operations. So a render before the start completes runs no start: it arms one start on a timer
+-- and fails with unavailable. When that start completes, its refresh renders the views again; when
+-- it fails, the next render, action or event tries again.
+local function started_render(fn)
+  return function(ctx, args)
+    if not startup.complete then
+      if not startup.armed then
+        startup.armed = true
+        rex.after(0, function() startup.armed = false; pcall(start) end)
+      end
+      fail('unavailable', 'The worktree records are not ready yet')
+    end
+    return fn(ctx, args)
+  end
+end
 
 -- The SDK gives the key of an agent action as ctx.key.
 local handlers = {
@@ -1793,7 +1809,7 @@ for _, a in ipairs(actions) do
 end
 
 -- The panel and the forms are raw views: the panel pages and the forms build their own trees.
-local views = {render = started(function(ctx, args) return ui_render(args).tree end),
+local views = {render = started_render(function(ctx, args) return ui_render(args).tree end),
   ['view.action'] = started(function(ctx, args) return ui_action(args) end)}
 app.view('/panels/worktrees', views, raw)
 app.view('/forms/*', views, raw)

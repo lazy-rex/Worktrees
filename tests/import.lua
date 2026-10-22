@@ -282,3 +282,30 @@ test('a key of 25000 quotes imports unchanged; it is the progress cursor of the 
   expect(count('staging'), 'no staging row stays').to_be(0)
   expect(state.max <= 65536, 'the largest request: ' .. state.max).to_be(true)
 end)
+
+-- A render cannot write (SDK eb9654d): a render before the start completes sends no SQL write. It
+-- fails with unavailable and arms one start on a timer; that start completes the import.
+test('a render during an incomplete start writes nothing; its timer completes the start', function()
+  local s = sandbox(kv_state())
+  s.hub_errors['hub.store.get'] = 'stream response "c" failed: store down (status=503 code=unavailable)'
+  s:tick()
+  expect(meta('kv_import')).to_be(nil)
+  local function writes()
+    local n = 0
+    for _, a in ipairs({'hub.sql.begin', 'hub.sql.exec', 'hub.sql.batch', 'hub.sql.commit'}) do n = n + (s.calls[a] or 0) end
+    return n
+  end
+  -- The store answers again, so a start in the render would copy the records now.
+  s.hub_errors['hub.store.get'] = nil
+  local before, timers = writes(), #s.timers
+  local render = s:perform('view.render', {route = '/panels/worktrees'})
+  expect(render.error and render.error.code).to_be('unavailable')
+  expect(writes(), 'the render sent no SQL write').to_be(before)
+  expect(#s.timers, 'one start is armed').to_be(timers + 1)
+  -- A second render arms no second start.
+  s:perform('view.render', {route = '/panels/worktrees'})
+  expect(#s.timers).to_be(timers + 1)
+  s:tick()
+  expect(meta('kv_import')).to_be('done')
+  expect(s:perform('view.render', {route = '/panels/worktrees'}).result ~= nil, 'the panel renders').to_be(true)
+end)
