@@ -153,7 +153,7 @@ local function pending_op(id)
 end
 -- One request is at most 64 KiB (a reply is at most about 1 MB, so a read needs no pieces). A
 -- value can be larger once it is JSON inside a SQL parameter: an open request of 16000 quotes
--- gives 64000 bytes, and a key of an older version can have 25000 quotes. So write never sends a
+-- gives 64000 bytes, and a key can have 25000 quotes. So write never sends a
 -- large value as a parameter of its statement. It writes each value over inline_bytes of encoded
 -- JSON to a row of the staging table first, in pieces of at most piece_bytes (at UTF-8 character
 -- boundaries): an INSERT with the first piece, then an UPDATE that appends each next one. The
@@ -518,7 +518,7 @@ local function mutate(caller, kind, args)
     fingerprint = 'create/' .. part(text(args.repo, 'repo')) .. part(text(args.branch, 'branch')) .. part(args.base == nil and '' or text(args.base, 'base'))
   else
     if args.accept_ignored ~= nil and type(args.accept_ignored) ~= 'boolean' then fail('invalid_input', 'accept_ignored must be boolean') end
-    -- accept_ignored = true is part of the content. Omitted or false keeps the earlier fingerprint.
+    -- accept_ignored = true is part of the content. Omitted or false adds nothing to the fingerprint.
     fingerprint = 'remove/' .. part(text(args.path, 'path')) .. (args.accept_ignored and part('accept_ignored') or '')
   end
   for _, alias in ipairs(caller.aliases) do
@@ -1518,7 +1518,7 @@ end
 
 -- worktree.open, the menu's Open items, the Start agent form and the shell after New Worktree all
 -- use open_request. req = {path, where, profile, title, args}. keys = {spawn, ensure}: the hub keys
--- (the user keeps the keys of older versions; hub.spawn keys are per caller). view = the user's
+-- (hub.spawn keys are per caller, so the spawn key has no caller part). view = the user's
 -- palette context ({session_id, window_id}); nil for an agent, which gets on_behalf instead.
 -- branch_title: without a title, the tab gets the branch name (the menu's Open items). The
 -- fingerprint keeps the title as given, so a replay does not depend on the current tree.

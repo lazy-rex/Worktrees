@@ -1,7 +1,7 @@
 -- A Git hook that fails with a large output. The operation record keeps the end of the error text
--- within 4096 bytes of encoded JSON, so the record fits one control message (64 KiB). Before, the
--- whole screen text went into the record: hub.store.batch failed ('control message too large'),
--- each retry failed the same way, and the operation stayed in phase sending.
+-- within 4096 bytes of encoded JSON, so the record fits one control message (64 KiB). With the
+-- whole screen text, the write of the record would fail ('control message too large') on each
+-- retry, and the operation would stay in phase sending.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local alice = agent('alice')
 

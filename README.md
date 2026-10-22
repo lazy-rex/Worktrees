@@ -19,12 +19,12 @@ returned: `git worktree add` fails with `git_error`.
 ## Source repository
 
 The panel shows first the repository of the source pane. The plugin keeps that repository per
-pane directory, so a panel render runs no Git for a directory that it already knows (observed on
-Rex 0.0.1792158932-g88fd41: before, a source pane added about 100 ms and 3 Git processes to each
-render). A new directory is looked up on its first render. A known directory is looked up again
-after the next refresh: the Refresh button, a focus of the panel, a worker change, or a create,
-remove, forget or discard. So when a repository appears or goes away in the same directory, the
-panel can show the old result until then. A plain `worktree.list` call does not start a new lookup.
+pane directory, so a panel render runs no Git for a directory that it already knows. (A lookup
+costs about 100 ms and 3 Git processes, observed on Rex 0.0.1792158932-g88fd41.) A new directory
+is looked up on its first render. A known directory is looked up again after the next refresh:
+the Refresh button, a focus of the panel, a worker change, or a create, remove, forget or discard.
+So when a repository appears or goes away in the same directory, the panel can show the old result
+until then. A plain `worktree.list` call does not start a new lookup.
 
 ## Panel pages
 

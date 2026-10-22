@@ -147,7 +147,7 @@ test('view: Open in new tab and Open in new session start a user shell', functio
     if w.cwd == tree.path and w.parent == 'user' then users = users + 1; expect(w.title).to_be('open/one') end
   end
   expect(users).to_be(2)
-  -- The intent records keep the keys of older versions (worktree-open/<operation key>).
+  -- The spawn key of an intent record is worktree-open/<operation key>.
   expect(W.intent('user', 'worktree-open/view-open-tab').phase).to_be('ready')
   expect(W.intent('user', 'worktree-open/view-open-session').request.placement.focus).to_be(nil)
 end)
@@ -179,7 +179,7 @@ test('view: New Worktree creates the tree and opens one shell; the agent sequenc
   expect(op.status).to_be('succeeded')
   local path = W.tree_path(repo, 'open/form')
   expect(workers_in(path)).to_be(1)
-  -- The shell after New Worktree keeps the key of older versions: worktree-open/created/<key>.
+  -- The spawn key of the shell after New Worktree is worktree-open/created/<key>.
   expect(W.intent('user', 'worktree-open/created/view-create').request.cwd).to_be(path)
   -- The agent sequence that reproduces the form: create, then open in a tab.
   local made = create(alice, 'open/agent-form', 'agent-form')

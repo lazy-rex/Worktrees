@@ -2,7 +2,7 @@
 -- accept ignored is set", the user, 2026-10-22). By default ignored files refuse removal. With
 -- accept_ignored = true the plugin runs plain git worktree remove (no --force): Git deletes the
 -- ignored files with the tree and still refuses changes and untracked files (observed on Git 2.54.0).
--- accept_ignored = true is part of the request content; omitted or false keeps the earlier one.
+-- accept_ignored = true is part of the request content; omitted or false adds nothing to it.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local repo = W.repo('ignored')
 W.write(repo .. '/.gitignore', 'log/\n')
@@ -65,12 +65,12 @@ test('accept_ignored is part of the key: a changed value conflicts; false and om
   -- The saved refusal replays for false as for omitted.
   expect_error(function() remove(path, 'key-1', false) end, 'ignored files')
   expect_error(function() alice:call('worktree.remove', {path = path, key = 'key-2', accept_ignored = 'yes'}) end, 'must be boolean')
-  -- A saved result of an earlier version (the fingerprint without the option) replays.
-  local id = W.part('alice') .. W.part('key-old')
+  -- A saved result whose fingerprint has no option part replays for omitted and for false.
+  local id = W.part('alice') .. W.part('key-saved')
   W.put_op(id, 'remove/' .. W.part(path), {path = path, removed = true})
-  expect(remove(path, 'key-old').removed).to_be(true)
-  expect(remove(path, 'key-old', false).removed).to_be(true)
-  expect_error(function() remove(path, 'key-old', true) end, 'operation_conflict')
+  expect(remove(path, 'key-saved').removed).to_be(true)
+  expect(remove(path, 'key-saved', false).removed).to_be(true)
+  expect_error(function() remove(path, 'key-saved', true) end, 'operation_conflict')
   expect(exists(path)).to_be(true)
 end)
 
