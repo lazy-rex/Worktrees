@@ -50,6 +50,7 @@ CREATE TABLE pending (id TEXT PRIMARY KEY, kind TEXT NOT NULL, fingerprint TEXT,
 CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, target TEXT NOT NULL);
                                            -- the discard/ and open/ records
+CREATE TABLE meta (name TEXT PRIMARY KEY, done INTEGER NOT NULL);   -- kv_import: the import is complete
 ```
 
 Import (once, in the start hook): one transaction copies `catalog.repos`, `catalog.pending`, every
