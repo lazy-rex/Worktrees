@@ -30,7 +30,6 @@ local function sandbox()
   end
   s.start_hook = function() return nil, 'no fork' end
   s.catalog = {repos = {['/r/.git'] = '/r', ['/q/.git'] = '/q'}, pending = {}}
-  s.hub_answers['hub.store.batch'] = function() return {revs = {catalog = '2'}} end
   return s
 end
 local function workers(cwd)
