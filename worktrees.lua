@@ -2,6 +2,9 @@
 local app = require('lazyrex').plugin('worktrees')
 local plugin_session = assert(app.session_id, 'plugin_session is required')
 local fail, hub = app.fail, app.hub
+-- Worktrees keeps its own operation records and saved results (hub.store), so no handler or event
+-- uses an SDK transaction or a saved reply.
+local raw = {tx = false, store = false}
 local function text(value, name)
   if type(value) ~= 'string' or value == '' or value:find('%z') then fail('invalid_input', name .. ' must be nonempty text without NUL') end
   return value
@@ -1065,24 +1068,24 @@ local pane_directories = {}
 local function managed(path)
   return type(path) == 'string' and (path == root or within(path, root))
 end
-rex.on('terminal.pwd_changed', function(ctx, ev)
+app.on('terminal.pwd_changed', function(ev, ctx)
   local path = type(ev.pwd) == 'string' and ev.pwd:match('^file://[^/]*(/.*)$') or nil
   if path then path = path:gsub('%%(%x%x)', function(hex) return string.char(tonumber(hex, 16)) end) end
   local was_managed = pane_directories[ctx.block_id]
   local is_managed = managed(path)
   pane_directories[ctx.block_id] = path and is_managed
   if was_managed or is_managed then notify('always') end
-end)
+end, raw)
 -- A pane can predate this plugin, so its last directory event can be unavailable.
-rex.on('terminal.child_exited', function(ctx, ev)
+app.on('terminal.child_exited', function(ev, ctx)
   if pane_directories[ctx.block_id] ~= false then notify('always') end
-end)
-rex.on('block_closed', function(ctx, ev)
+end, raw)
+app.on('block_closed', function(ev, ctx)
   local block = ev.block_id or ctx.block_id
   local was_managed = pane_directories[block]
   pane_directories[block] = nil
   if was_managed then notify('always') end
-end)
+end, raw)
 
 -- The Worktrees panel and forms (the maintainer, 2026-10-17: no tab; palette commands and a side panel).
 -- A route carries a selected tree as a query: /forms/worktree?path=<percent-encoded path>.
@@ -1633,9 +1636,7 @@ local function start()
 end
 local function started(fn) return function(ctx, args) start(); return fn(ctx, args) end end
 
--- Worktrees keeps its own operation records and saved results (hub.store), so no handler uses an
--- SDK transaction or a saved reply: tx = false, store = false. The SDK gives the key as ctx.key.
-local raw = {tx = false, store = false}
+-- The SDK gives the key of an agent action as ctx.key.
 local handlers = {
   ['worktree.create'] = function(ctx, args)
     args.key = ctx.key
