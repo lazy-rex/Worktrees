@@ -23,7 +23,8 @@ end
 local function remove(key, path)
   return W.settle(function() return alice:call('worktree.remove', {key = key, path = path}) end)
 end
--- A wait callback returns its value (tests/upvalue.lua).
+-- A wait callback returns its value, not a captured local (vault note "rex lua closures can detach
+-- captured locals after pcall catches an error").
 local function list(args, predicate)
   return wait('the worktree list', function()
     local result = alice:call('worktree.list', args or {})

@@ -190,7 +190,8 @@ local function git_runs()
   return n
 end
 local function git_quiet()
-  -- The callback keeps its state across polls in a table field (tests/upvalue.lua).
+  -- The callback keeps its state across polls in a table field (vault note "rex lua closures can
+  -- detach captured locals after pcall catches an error").
   local seen = {last = git_runs()}
   wait('Git is quiet', function()
     rex.sleep(1)
