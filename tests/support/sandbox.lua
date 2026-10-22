@@ -125,6 +125,9 @@ return function(plugin_dir, base, opts)
   local sdk = assert(loadfile(assert(base.H.args.sdk, 'H.args.sdk is required') .. '/lazyrex.lua'))
   setfenv(sdk, env)
   local lazyrex = sdk()
+  -- Count only from the main chunk of the plugin on: the SDK module itself can run a pcall when it
+  -- loads (observed on hub d912148: pcall(install), the read-tracking wrappers).
+  s.pcalls = 0
   env.require = function(name) if name == 'lazyrex' then return lazyrex end return base.require(name) end
   local chunk = assert(loadfile(plugin_dir .. '/worktrees.lua'))
   setfenv(chunk, env)
