@@ -56,6 +56,18 @@ A refresh still lists the trees of each repository and matches the workers in th
 returns `git_error`, and the created worktree remains. The error keeps the end of the Git output,
 at most 4096 bytes of JSON.
 
+## Remove
+
+Remove (`worktree.remove`, or **Remove Worktree…**) runs plain `git worktree remove`, never
+`--force`, and never deletes the branch. It is refused while a worker or a terminal pane uses the
+tree, and while the tree has changes or untracked files.
+
+Ignored files (for example `log/`, `tmp/` or `.env`) also refuse removal by default: they can be the
+only copy of a key or of local data. With `accept_ignored = true` (in the form: **Also delete
+ignored files**), Git deletes the ignored files with the tree. Changes and untracked files still
+refuse removal (observed with Git 2.54.0). `accept_ignored` is part of the request content of its
+key, so a refusal without it needs a new key.
+
 ## Forget repository
 
 The menu of a repository row (its main tree, or the unavailable row of a repository that Git

@@ -95,6 +95,24 @@ local function status_command(path, ignored)
   if ignored then argv[#argv + 1] = '--ignored' end
   return argv
 end
+-- status_refusal gives the refusal for the output of a status_command, or nil for no output. An
+-- entry other than '!! ' (ignored) is a change. With -z, the second path of a rename follows its
+-- change entry, so the change is found first.
+-- Ignored files refuse removal unless the caller sets accept_ignored (decision "LazyRex worktree remove
+-- refuses ignored files unless accept ignored is set", the user, 2026-10-22).
+local ignored_refusal = 'The worktree has ignored files; removal is refused. To delete them with the tree, use a new key with accept_ignored = true (in the Remove form: Also delete ignored files)'
+local changes_refusal = 'The worktree has changes or untracked files; removal is refused'
+local function status_refusal(stdout)
+  if stdout == '' then return nil end
+  local any = false
+  for entry in stdout:gmatch('([^%z]*)%z') do
+    if entry ~= '' then
+      if entry:sub(1, 3) ~= '!! ' then return changes_refusal end
+      any = true
+    end
+  end
+  return any and ignored_refusal or changes_refusal
+end
 local function identity(path)
   local dir = real(line(checked({'git', '-C', path, 'rev-parse', '--absolute-git-dir'})))
   -- Rex runs on macOS. Birth time and inode distinguish a replacement at the same path.
@@ -452,7 +470,7 @@ local function remove(caller, id, fingerprint, args, pending)
     local tree = find_tree(info.common, path)
     if info.top ~= path or not tree or tree.bare or path == info.repo then fail('refused', 'Select a linked worktree, not the main repository') end
     op = {kind = 'remove', fingerprint = fingerprint, repo = info.repo, common = info.common, actor = caller.agent,
-      path = path, branch = tree.branch or '', identity = identity(path), phase = 'prepared'}
+      path = path, branch = tree.branch or '', identity = identity(path), phase = 'prepared', accept_ignored = args.accept_ignored or nil}
     admit(id, op)
   end
   if op.phase == 'sending' then
@@ -476,11 +494,13 @@ local function remove(caller, id, fingerprint, args, pending)
     for _, pane in ipairs(lock.panes or {}) do details[#details + 1] = (pane.block_id or '?') .. ' · ' .. (pane.label or '') .. ' · ' .. (pane.cwd or '') end
     return finish(id, op, {error = {code = 'refused', message = 'A worker or terminal pane uses this worktree, or a worker has an unknown working directory.\n' .. join(details, '\n')}})
   end
-  local check = check_status(id, op.path, true)
+  -- With accept_ignored the check leaves ignored files out. git worktree remove (no --force)
+  -- deletes them with the tree, and Git itself still refuses changes and untracked files.
+  local check = check_status(id, op.path, not op.accept_ignored)
   if not check then return {status = 'running'} end
   if not check.ok then return finish(id, op, {error = {code = 'git_error', message = check.stderr}}) end
   if check.stdout ~= '' then
-    return finish(id, op, {error = {code = 'refused', message = 'The worktree has changes or ignored files; removal is refused'}})
+    return finish(id, op, {error = {code = 'refused', message = status_refusal(check.stdout)}})
   end
   local r = mutation(id, op, {'worktree', 'remove', '--', op.path})
   if not r then return {status = 'running'} end
@@ -497,7 +517,11 @@ local function mutate(caller, kind, args)
   local fingerprint
   if kind == 'create' then
     fingerprint = 'create/' .. part(text(args.repo, 'repo')) .. part(text(args.branch, 'branch')) .. part(args.base == nil and '' or text(args.base, 'base'))
-  else fingerprint = 'remove/' .. part(text(args.path, 'path')) end
+  else
+    if args.accept_ignored ~= nil and type(args.accept_ignored) ~= 'boolean' then fail('invalid_input', 'accept_ignored must be boolean') end
+    -- accept_ignored = true is part of the content. Omitted or false keeps the earlier fingerprint.
+    fingerprint = 'remove/' .. part(text(args.path, 'path')) .. (args.accept_ignored and part('accept_ignored') or '')
+  end
   for _, alias in ipairs(caller.aliases) do
     local id = part(alias) .. part(key)
     local saved = saved_op(id)
@@ -1061,7 +1085,10 @@ local function submit_worktree(args)
     request.repo = values.repo
     request.branch = values.branch
     if values.base ~= '' then request.base = values.base end
-  else request.path = values.path end
+  else
+    request.path = values.path
+    if values.accept_ignored == true then request.accept_ignored = true end
+  end
   local result = mutate(user_caller, kind, request)
   if result.status == 'running' then return result end
   refresh_safe()
@@ -1074,10 +1101,14 @@ collect_scans = function()
       local result, err = advice.handle:wait(0.001)
       if result or err ~= 'timeout' then
         advice.handle = nil
-        local reason
+        local reason, ignored
         if not result or not result.ok then reason = result and result.stderr or tostring(err)
-        elseif result.stdout ~= '' then reason = 'The worktree has changes or ignored files; removal is refused' end
-        advice.result = {ok = not reason, reasons = reason and {reason} or {}}
+        else
+          reason = status_refusal(result.stdout)
+          -- Only ignored files: the form's Also delete ignored files decides.
+          if reason == ignored_refusal then reason, ignored = nil, true end
+        end
+        advice.result = {ok = not reason, reasons = reason and {reason} or {}, ignored = ignored}
         changed = true
       end
     end
@@ -1419,12 +1450,16 @@ local function render_remove(context, path)
   local nodes = {
     {id = 'about', type = 'widget', text = tree_detail(tree)},
     {id = 'remove_worktree', type = 'form', fields = {
-      {id = 'path', label = 'Worktree', kind = 'select', required = true, value = path, options = {{value = path, label = tree.branch}}}},
+      {id = 'path', label = 'Worktree', kind = 'select', required = true, value = path, options = {{value = path, label = tree.branch}}},
+      {id = 'accept_ignored', label = 'Also delete ignored files', kind = 'boolean', value = false, required = false}},
       submit_action = {name = 'submit', label = 'Remove worktree', enabled = true, tool = 'worktree.remove'}}}
   local advice = remove_advice(path)
   if not advice then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Checking the worktree…'}
-  elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. join(advice.reasons or {}, '\n')} end
-  nodes[#nodes + 1] = {id = 'help', type = 'widget', text = 'Removal never forces and never deletes the branch.'}
+  elseif not advice.ok then nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'Removal will be refused:\n' .. join(advice.reasons or {}, '\n')}
+  elseif advice.ignored then
+    nodes[#nodes + 1] = {id = 'check', type = 'widget', text = 'The worktree has ignored files. Removal is refused unless Also delete ignored files is on; then Git deletes the ignored files with the tree.'}
+  end
+  nodes[#nodes + 1] = {id = 'help', type = 'widget', text = 'Removal never forces and never deletes the branch. Ignored files are deleted only with Also delete ignored files.'}
   nodes[#nodes + 1] = cancel_node()
   return {title = 'Remove ' .. tree.branch, nodes = nodes}
 end
@@ -1675,8 +1710,8 @@ local actions = {
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known, created_at: the admission time as RFC 3339 UTC text, absent for an operation admitted before this version), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',
     args = {type = 'object', properties = {repo = {type = 'string'}, worktrees_after = {type = 'string', minLength = 1}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'worktree.remove', title = 'Remove a worktree',
-    description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Retry from the same caller, with the same key and unchanged arguments, until the result is not running. The first retry after a plugin restart can return running. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
-    args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
+    description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, untracked files, workers, and terminal panes in the tree. Ignored files also refuse removal, unless accept_ignored = true: then Git deletes the ignored files with the tree (changes and untracked files still refuse). accept_ignored is part of the request content of the key. A running result requires a same-key retry. Retry from the same caller, with the same key and unchanged arguments, until the result is not running. The first retry after a plugin restart can return running. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
+    args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}, accept_ignored = {type = 'boolean'}}, required = {'path', 'key'}, additionalProperties = false}},
   {name = 'worktree.open', title = 'Open a worktree',
     description = 'Start a profile (default shell; hub.profiles lists them, for example an agent) with the worktree as its directory, in a new tab of your session (where=tab) or in a new session (where=session). After worktree.create, open a shell with this action, as the New Worktree form does. You own the worker (hub.stop). Choose a key; after an unknown outcome or a running result, retry with the same key and content.',
     args = {type = 'object', properties = {path = {type = 'string', minLength = 1}, where = {type = 'string', enum = {'tab', 'session'}},

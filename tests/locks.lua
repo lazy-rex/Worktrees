@@ -50,7 +50,7 @@ test('the status check of a removal does not write the index; the removal is ref
   local err = expect_error(function()
     W.settle(function() return alice:call('worktree.remove', {path = tree, key = 'remove-1'}) end)
   end, 'refused')
-  expect(tostring(err.message)).to_match('changes or ignored files')
+  expect(tostring(err.message)).to_match('changes or untracked files')
   expect(bytes(index) == before, 'the index is unchanged').to_be(true)
 end)
 
@@ -69,6 +69,6 @@ test('the removal advice does not write the index; it shows the untracked file',
     local t = check and check.text or ''
     return t ~= '' and not t:find('Checking', 1, true) and t
   end, 20)
-  expect(text).to_match('changes or ignored files')
+  expect(text).to_match('changes or untracked files')
   expect(bytes(index) == before, 'the index is unchanged').to_be(true)
 end)
