@@ -53,10 +53,8 @@ return function(plugin_dir, base)
     end,
   }
   local env = setmetatable({rex = stub, pcall = function(...) s.pcalls = s.pcalls + 1; return pcall(...) end}, {__index = base})
-  -- The SDK (require('lazyrex')) loads with the same stub, from the LazyRex checkout of the test run
-  -- (H.args.lib is <checkout>/lab/test; the hub starts the plugin with <checkout>/sdk/lua).
-  local checkout = assert(base.H.args.lib:match('^(.*)/lab/test/?$'), 'the LazyRex checkout is unknown')
-  local sdk = assert(loadfile(checkout .. '/sdk/lua/lazyrex.lua'))
+  -- The SDK (require('lazyrex')) loads with the same stub, from the directory that the hub gets.
+  local sdk = assert(loadfile(assert(base.H.args.sdk, 'H.args.sdk is required') .. '/lazyrex.lua'))
   setfenv(sdk, env)
   local lazyrex = sdk()
   env.require = function(name) if name == 'lazyrex' then return lazyrex end return base.require(name) end

@@ -216,3 +216,17 @@ test('tool: a key that both IDs used is refused after the migration', function()
   dave:hub('hub.stop', {spawn_id = mine.spawn_id})
   dave:hub('hub.stop', {spawn_id = legacy.spawn_id})
 end)
+
+-- The schema limits count characters, not bytes (JSON Schema): the title has at most 60, and the
+-- hub counts 60 runes. 60 two-byte characters open; 61 are refused.
+test('tool: a title of 60 two-byte characters opens; 61 are refused', function()
+  local title = string.rep('é', 60)
+  local result = open(alice, {path = tree.path, title = title, key = 'title-60'})
+  expect(result.status).to_be('open')
+  expect(worker(result.spawn_id).title).to_be(title)
+  alice:hub('hub.stop', {spawn_id = result.spawn_id})
+  -- Rex checks the declared schema first (bad_request; observed on Rex 0.0.1792158932-g88fd41); the SDK
+  -- and the plugin refuse with invalid_input.
+  local e = expect_error(function() alice:call('worktree.open', {path = tree.path, title = title .. 'é', key = 'title-61'}) end)
+  expect(e.code == 'bad_request' or e.code == 'invalid_input', 'refused: ' .. tostring(e.code)).to_be(true)
+end)
