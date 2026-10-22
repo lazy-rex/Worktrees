@@ -589,10 +589,11 @@ end
 -- worktrees 16 KiB and operations 24 KiB a page, the other fields 4 KiB, all of it 44 KiB (45056).
 local page_limit, worktrees_bytes, operations_bytes, meta_bytes, reply_bytes = 50, 16384, 24576, 4096, 45056
 local function encoded(value) return #rex.json.encode(value) end
--- cut keeps text within 1024 bytes, the ellipsis included, at a UTF-8 character boundary.
-local function cut(value)
-  if type(value) ~= 'string' or #value <= 1024 then return value end
-  local n = 1024 - #'…'
+-- cut keeps text within limit bytes (default 1024), the ellipsis included, at a UTF-8 character boundary.
+local function cut(value, limit)
+  limit = limit or 1024
+  if type(value) ~= 'string' or #value <= limit then return value end
+  local n = limit - #'…'
   while n > 0 and value:byte(n + 1) >= 0x80 and value:byte(n + 1) < 0xC0 do n = n - 1 end
   return value:sub(1, n) .. '…'
 end
@@ -1153,38 +1154,112 @@ end
 local function cancel_node()
   return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = 'Cancel', enabled = true}}
 end
-local function render_panel(context)
-  local source = repo_default(context)
-  local items = {}
-  local rows, main = trees_for(source)
-  for _, tree in ipairs(rows) do
-    items[#items + 1] = {id = tree.path, label = tree.branch, detail = tree_detail(tree),
-      action = {name = 'select', label = 'Actions…', enabled = true, user_only = 'navigation'}}
+-- Panel pages. A view reply that is too large never arrives: the hub keeps the old tree (hub
+-- docs/rex-protocol.md, "Rex Lua runtime": one control message is 64 KiB). So a rendered view
+-- encodes to at most 48 KiB ({tree = tree}, the status included), and each entry (a tree row or a
+-- stopped operation) to at most 8 KiB. The panel shows the entries that fit; More… opens the form
+-- /forms/worktrees-more?start=<n> with the next ones. Every text is cut; an entry that is still
+-- too large loses its optional text, and only an entry whose exact ID does not fit becomes a
+-- placeholder without an action.
+local view_bytes, entry_bytes = 49152, 8192
+local function select_action(enabled) return {name = 'select', label = 'Actions…', enabled = enabled, user_only = 'navigation'} end
+local function tree_entry(tree, n)
+  local item = {id = tree.path, label = cut(tree.branch), detail = cut(tree_detail(tree)), action = select_action(true)}
+  if encoded(item) > entry_bytes then item.label, item.detail = cut(tree.branch, 64), '' end
+  if encoded(item) > entry_bytes then
+    item = {id = 'oversized/' .. n, label = '(path too long)', detail = 'The path of this worktree is too long for the panel. worktree.list lists it.', action = select_action(false)}
   end
+  return {item = item, bytes = encoded(item)}
+end
+local function pending_entry(id, op, n)
+  local discard_action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}
+  local node = {id = 'pending/' .. id, type = 'widget', text = cut(op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.'), action = discard_action}
+  if encoded(node) > entry_bytes then node.text = cut(op.kind .. ' (' .. op.phase .. ')', 64) end
+  if encoded(node) > entry_bytes then
+    node = {id = 'pending-oversized/' .. n, type = 'widget', text = 'A stopped operation has an ID too long for the panel. ' ..
+      'An agent can discard it with worktree.discard and its full operation ID; its caller can also use its operation key.'}
+  end
+  return {node = node, bytes = encoded(node)}
+end
+-- panel_entries gives the source text and the entries: the tree rows (the source rows first), then
+-- the stopped operations in operation ID order (the catalog arrives as JSON at each render, and its
+-- table order is not stable).
+local function panel_entries(context)
+  local source = repo_default(context)
+  local rows, main = trees_for(source)
+  local entries = {}
+  for _, tree in ipairs(rows) do entries[#entries + 1] = tree_entry(tree, #entries + 1) end
   local state = catalog()
-  -- The source repository shows also when the catalog does not record it (after Forget, or before
-  -- its first create): worktree.list and the panel of other panes do not show it.
-  local source_text = source and ('Repository: ' .. source .. ((main and not recorded(state, main)) and ' (not recorded)' or ''))
-  local nodes = {
-    {id = 'new', type = 'widget', text = source_text or 'The source pane is not in a Git repository.',
-      action = {name = 'new', label = 'New Worktree…', enabled = true, user_only = 'navigation'}},
-    {id = 'worktrees', type = 'list', label = 'Worktrees', items = items},
-    {id = 'refresh', type = 'widget', text = 'Managed root: ' .. root, action = {name = 'refresh', label = 'Refresh', enabled = true, tool = 'worktree.list'}},
-  }
-  -- Operation ID order: the catalog arrives as JSON at each render, and its table order is not stable.
   local ids = {}
   for id in pairs(state.pending) do ids[#ids + 1] = id end
   table.sort(ids)
-  for _, id in ipairs(ids) do
-    local op = state.pending[id]
-    nodes[#nodes + 1] = {id = 'pending/' .. id, type = 'widget', text = op.kind .. ': ' .. op.path .. '\nState: ' .. op.phase .. '.',
-      action = {name = 'discard', label = 'Discard stopped operation', enabled = true, tool = 'worktree.discard'}}
+  for _, id in ipairs(ids) do entries[#entries + 1] = pending_entry(id, state.pending[id], #entries + 1) end
+  -- The source repository shows also when the catalog does not record it (after Forget, or before
+  -- its first create): worktree.list and the panel of other panes do not show it.
+  local source_text = source and cut('Repository: ' .. source .. ((main and not recorded(state, main)) and ' (not recorded)' or ''))
+  return source_text, entries
+end
+-- page builds the nodes of entries[start..] that fit: head and tail are the fixed nodes before and
+-- after the entries, and status the root status. The list node 'worktrees' gets the tree rows; the
+-- stopped operations follow it. A More widget ends a page that does not hold the rest.
+local function page(title, head, tail, status, entries, start)
+  local function build(last)
+    local items, nodes = {}, {}
+    for _, n in ipairs(head) do nodes[#nodes + 1] = n end
+    nodes[#nodes + 1] = {id = 'worktrees', type = 'list', label = 'Worktrees', items = items}
+    for i = start, last do
+      if entries[i].item then items[#items + 1] = entries[i].item else nodes[#nodes + 1] = entries[i].node end
+    end
+    if last < #entries then
+      nodes[#nodes + 1] = {id = 'more/' .. (last + 1), type = 'widget', text = (#entries - last) .. ' more entries.',
+        action = {name = 'more', label = 'More…', enabled = true, user_only = 'navigation'}}
+    end
+    for _, n in ipairs(tail) do nodes[#nodes + 1] = n end
+    return {title = title, status = status, nodes = nodes}
   end
-  if refresh_error then nodes[#nodes + 1] = {id = 'refresh_error', type = 'widget', text = refresh_error} end
+  -- The sizes of the entries add up. The fixed part is the page without entries: it has a More
+  -- widget when entries remain; 32 bytes cover its longer numbers.
+  local fixed = encoded({tree = build(start - 1)}) + 32
+  local used, last = fixed, start - 1
+  for i = start, #entries do
+    if used + entries[i].bytes + 1 > view_bytes then break end
+    used, last = used + entries[i].bytes + 1, i
+  end
+  local tree = build(last)
+  -- The exact check: drop entries from the end while the page is too large.
+  while last > start and encoded({tree = tree}) > view_bytes do last = last - 1; tree = build(last) end
+  return tree
+end
+local function render_panel(context)
+  local source_text, entries = panel_entries(context)
+  local head = {
+    {id = 'new', type = 'widget', text = source_text or 'The source pane is not in a Git repository.',
+      action = {name = 'new', label = 'New Worktree…', enabled = true, user_only = 'navigation'}},
+  }
+  local tail = {
+    {id = 'refresh', type = 'widget', text = cut('Managed root: ' .. root), action = {name = 'refresh', label = 'Refresh', enabled = true, tool = 'worktree.list'}},
+  }
+  if refresh_error then tail[#tail + 1] = {id = 'refresh_error', type = 'widget', text = cut(refresh_error)} end
   local status
   if refresh_error then status = {state = 'error', msg = 'Could not refresh worktrees'}
   elseif snapshot.refreshing then status = {state = 'working', msg = 'Checking worktrees'} end
-  return {title = 'Worktrees', status = status, nodes = nodes}
+  return page('Worktrees', head, tail, status, entries, 1)
+end
+-- more_start reads the start of a More page: 1 to 6 decimal digits, at least 1.
+local function more_start(value)
+  if type(value) ~= 'string' or not value:match('^%d+$') or #value > 6 or tonumber(value) < 1 then
+    fail('invalid_input', 'start must be a positive number of at most 6 digits')
+  end
+  return tonumber(value)
+end
+local function render_more(context, start)
+  local _, entries = panel_entries(context)
+  if start > #entries then
+    return {title = 'Worktrees', nodes = {{id = 'end', type = 'widget', text = 'No more entries. The list changed.'}, cancel_node()}}
+  end
+  local head = {{id = 'about', type = 'widget', text = 'Entries from ' .. start .. ' of ' .. #entries .. '.'}}
+  -- ui_render adds the form status; the page reserves it.
+  return page('Worktrees', head, {cancel_node()}, {state = 'blocked', kind = 'question', msg = 'Waiting for input'}, entries, start)
 end
 local function render_tree_menu(path)
   local tree = path and find_known(path)
@@ -1311,6 +1386,8 @@ local function ui_render(args)
   local context = args.context
   local tree
   if base == '/panels/worktrees' then tree = render_panel(context)
+  elseif base:match('^/forms/worktrees%-more%?') or base == '/forms/worktrees-more' then
+    tree = render_more(context, more_start(base:match('^/forms/worktrees%-more%?start=(.*)$')))
   elseif base == '/forms/worktree' then tree = render_tree_menu(path)
   elseif base == '/forms/new-worktree' then tree = render_new(context)
   elseif base == '/forms/remove-worktree' then tree = render_remove(context, path)
@@ -1319,7 +1396,10 @@ local function ui_render(args)
   elseif base:sub(1, 22) == '/forms/worktree-agent/' then tree = render_agent(base:sub(23), path)
   else fail('invalid_input', 'Unknown route') end
   if base:sub(1, 7) == '/forms/' then tree.status = {state = 'blocked', kind = 'question', msg = 'Waiting for input'} end
-  return {tree = tree}
+  -- The final size check, with the status (see Panel pages): a reply that is too large never arrives.
+  local reply = {tree = tree}
+  if encoded(reply) > view_bytes then fail('too_large', 'This view is larger than 48 KiB') end
+  return reply
 end
 
 -- worktree.open, the menu's Open items, the Start agent form and the shell after New Worktree all
@@ -1467,12 +1547,16 @@ end
 local function ui_action(args)
   local base, path = route_path(args.route or '')
   local input = type(args.input) == 'table' and args.input or {}
-  if base == '/panels/worktrees' then
-    if args.node_id == 'new' and args.action == 'new' then return {form = '/forms/new-worktree'} end
+  local more_page = base == '/forms/worktrees-more' or base:match('^/forms/worktrees%-more%?') ~= nil
+  if base == '/panels/worktrees' or more_page then
+    if base == '/panels/worktrees' and args.node_id == 'new' and args.action == 'new' then return {form = '/forms/new-worktree'} end
     if args.node_id == 'worktrees' and args.action == 'select' and type(input.item_id) == 'string' then
       return {form = route_with_path('/forms/worktree', input.item_id)}
     end
-    if args.node_id == 'refresh' and args.action == 'refresh' then refresh_safe(); return {} end
+    if base == '/panels/worktrees' and args.node_id == 'refresh' and args.action == 'refresh' then refresh_safe(); return {} end
+    if args.action == 'more' and type(args.node_id) == 'string' and args.node_id:sub(1, 5) == 'more/' then
+      return {form = '/forms/worktrees-more?start=' .. more_start(args.node_id:sub(6))}
+    end
     if args.action == 'discard' and type(args.node_id) == 'string' and args.node_id:sub(1, 8) == 'pending/' then
       if args.user ~= 'user' then fail('refused', 'Only the user can discard an operation') end
       local result = discard_request(user_caller, {id = args.node_id:sub(9)}, args.operation_key); refresh_safe(); return result

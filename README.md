@@ -26,6 +26,20 @@ after the next refresh: the Refresh button, a focus of the panel, a worker chang
 remove, forget or discard. So when a repository appears or goes away in the same directory, the
 panel can show the old result until then. A plain `worktree.list` call does not start a new lookup.
 
+## Panel pages
+
+A view reply that is too large never arrives (one Rex control message is 64 KiB), so each view
+of the plugin encodes to at most 48 KiB. The panel shows the tree rows (the source repository
+first) and then the stopped operations, as many as fit. If more remain, **More…** opens the next
+page; on that page, a row opens its menu, and Discard works as on the panel. If the list changes
+between pages, a page can repeat or skip an entry.
+
+Long texts are cut. A row or an operation that is still too large loses its label and detail
+first. Only when its exact ID does not fit (a very long path, or an operation key of many KiB)
+does it show as a placeholder without an action: discard such an operation with
+`worktree.discard` and its full operation ID (`worktree.list` lists it), or with its operation key
+as its caller. Another view that is still over 48 KiB fails with `too_large`.
+
 ## Scans
 
 The plugin checks each tree in the background: the tree exists, then `git --no-optional-locks status`.
