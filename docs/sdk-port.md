@@ -51,13 +51,17 @@ CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT N
 CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, record TEXT NOT NULL);
                                            -- the discard/ and open/ records, each whole as JSON (an open intent
                                            -- keeps its request, keys and state, not only a path)
-CREATE TABLE meta (name TEXT PRIMARY KEY, done INTEGER NOT NULL);   -- kv_import: the import is complete
+CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);   -- kv_import_after, kv_import
 ```
 
-Import (once, in the start hook): one transaction copies `catalog.repos`, `catalog.pending`, every
-saved operation result, and the `discard/` and `open/` records, and writes the row
-`meta(name = 'kv_import', done = 1)` (a table `meta (name TEXT PRIMARY KEY, done INTEGER)`). Only that
-row says that the import is complete: empty `repos` and `pending` are valid after Forget, so they never
+Import (once, in the start hook), in pages: each `hub.sql.batch` copies one page and writes the
+progress row `meta(name = 'kv_import_after')` with the last key of that page; a restart resumes from
+it. Sources: the KV record `catalog` (repos and pending), `hub.store.scan` with the prefixes `open/` and
+`discard/`, and `hub.store.ops_scan` for every saved operation result (hub lead, to be added on
+hub/sql). The last batch writes `meta(name = 'kv_import', value = 'done')` with the last page. The importing
+instance is the only writer of its namespace (the retirement fence), and it writes none of these keys
+until the import is complete, so the source stays stable. Only the done row says that the import
+is complete: empty `repos` and `pending` are valid after Forget, so they never
 trigger an import. Every saved result moves, also a completed operation that no pending entry or
 reservation names; else its key could run again. The KV store has no key listing today, so G8
 must be resolved before the cutover.
@@ -122,4 +126,6 @@ sweep and the routes in `lazyrex.json` stay. Line counts before and after go in 
 - G6: `begin`, `commit` and `batch` work from timers, events and start code.
 - G4: the hub saves a reply only for a commit with `key`; Worktrees uses `store = false`.
 - G7: raw hub calls (`app.hub`), also `hub.store.*` during the port.
-- Open: G8 (KV key listing for the import); G1, G5, G9 and G10 are SDK surfaces (claude-22).
+- G8: `hub.store.scan {prefix, after?, limit?}` exists; `hub.store.ops_scan {after?, limit?}` is new (hub lead,
+  hub/sql). The import pages through both (section 3).
+- G1, G5, G9 and G10 are SDK surfaces (claude-22).
