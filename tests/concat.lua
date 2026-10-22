@@ -1,8 +1,9 @@
 -- Long lists (sandbox, tests/support/sandbox.lua). Rex Lua fails table.concat of more than 2559
 -- items with "registry overflow" (observed on Rex 0.0.1792158932-g88fd41; LazyRex
--- docs/rex-protocol.md). Each list that can grow joins through join(): a tree row with its
--- workers, the worker set of a refresh, the unattributed workers of Forget, the workers of a
--- refused remove, and the reasons of the removal advice (a view still has its 48 KiB guard).
+-- docs/rex-protocol.md). The SDK replaces table.concat with a concat that has no limit
+-- (boot.lua; hub v0.4.1 and later), and the sandbox does the same. These lists can grow: a
+-- tree row with its workers, the worker set of a refresh, the unattributed workers of Forget, the
+-- workers of a refused remove, and the reasons of the removal advice (a view still has its 48 KiB guard).
 local tests_dir = H.args.file:match('^(.*)/[^/]*$')
 local load_sandbox = load_fixture(tests_dir .. '/support/sandbox.lua')
 local base = getfenv(1)

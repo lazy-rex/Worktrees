@@ -102,9 +102,13 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 The plugin loads its other files from its own directory, so keep them together.
 
 The plugin runs on the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). The hub starts it
-through the SDK's `boot.lua`, so the hub must have the SDK launcher. The plugin keeps its records in its
-SQL database (`hub.sql`). One request is at most 64 KiB, so a large value (a long open request or key, as JSON inside a
-SQL parameter) goes first in pieces to a staging table, and one transaction writes the record.
+through the SDK's `boot.lua`, so the hub must have the SDK launcher. The plugin needs LazyRex
+hub v0.4.1 or later: there, `boot.lua` gives `table.concat` no length limit, and the plugin joins
+long lists with it.
+
+The plugin keeps its records in its SQL database (`hub.sql`). One request is at most 64 KiB, so a
+large value (a long open request or key, as JSON inside a SQL parameter) goes first in pieces to a
+staging table, and one transaction writes the record.
 
 ## Tests
 

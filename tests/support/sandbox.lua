@@ -123,6 +123,9 @@ return function(plugin_dir, base, opts)
   local sdk = assert(loadfile(assert(base.H.args.sdk, 'H.args.sdk is required') .. '/lazyrex.lua'))
   setfenv(sdk, env)
   local lazyrex = sdk()
+  -- The hub starts a plugin through the SDK's boot.lua, which sets table.concat to the SDK concat
+  -- (no length limit). The sandbox does the same in the plugin's environment only.
+  env.table = setmetatable({concat = lazyrex.concat}, {__index = table})
   -- Count only from the main chunk of the plugin on: the SDK module itself can run a pcall when it
   -- loads (observed on hub d912148: pcall(install), the read-tracking wrappers).
   s.pcalls = 0
