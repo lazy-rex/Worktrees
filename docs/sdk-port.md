@@ -48,8 +48,9 @@ CREATE TABLE repos (common TEXT PRIMARY KEY, repo TEXT NOT NULL);
 CREATE TABLE pending (id TEXT PRIMARY KEY, kind TEXT NOT NULL, fingerprint TEXT, phase TEXT NOT NULL,
   actor TEXT, op TEXT NOT NULL);           -- op: the operation record as JSON (path, branch, block, ...)
 CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, target TEXT NOT NULL);
-                                           -- the discard/ and open/ records
+CREATE TABLE reservations (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, record TEXT NOT NULL);
+                                           -- the discard/ and open/ records, each whole as JSON (an open intent
+                                           -- keeps its request, keys and state, not only a path)
 CREATE TABLE meta (name TEXT PRIMARY KEY, done INTEGER NOT NULL);   -- kv_import: the import is complete
 ```
 
