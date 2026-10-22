@@ -1,28 +1,12 @@
 -- Worktree management. Git owns the trees. The hub owns operation records and cwd locks.
-local hub_id = assert(rex.args.hub_client_id, 'hub_client_id is required')
-local instance_id = assert(rex.args.instance_id, 'instance_id is required')
-local plugin_session = assert(rex.args.plugin_session or rex.session_id, 'plugin_session is required')
-local function fail(code, message) error({code = code, message = message}) end
+local app = require('lazyrex').plugin('worktrees')
+local plugin_session = assert(app.session_id, 'plugin_session is required')
+local fail, hub = app.fail, app.hub
 local function text(value, name)
   if type(value) ~= 'string' or value == '' or value:find('%z') then fail('invalid_input', name .. ' must be nonempty text without NUL') end
   return value
 end
 local function part(value) return tostring(#value) .. ':' .. value end
-local function hub(action, args)
-  local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
-  if type(response) ~= 'table' then
-    if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Hub request failed') end
-    -- Observed on Rex 0.0.1792158932-g88fd41 (lab): a hub error arrives as text that ends with
-    -- "(status=<n> code=<code>)". Keep the hub's code: a refusal is final. Only an error with no
-    -- code, or a lost or timed-out call, is unavailable, so the hub retries it.
-    local message = tostring(err or 'Hub request failed')
-    local code = message:match('code=([%w_]+)%)$')
-    if not code or code == 'unavailable' or code == 'disconnected' or code == 'timeout' then fail('unavailable', message) end
-    fail(code, message:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or message)
-  end
-  if type(response.result) ~= 'table' then fail('internal', 'Invalid hub result') end
-  return response.result
-end
 local git_env = {GIT_DIR = false, GIT_WORK_TREE = false, GIT_COMMON_DIR = false,
   GIT_INDEX_FILE = false, GIT_CONFIG_COUNT = false, GIT_CONFIG_PARAMETERS = false}
 local function run(argv, cwd)
@@ -39,7 +23,7 @@ local function line(value) return (value:gsub('\n$', '')) end
 local function real(path) return line(checked({'realpath', path})) end
 local function exists(path) return run({'test', '-e', path}).ok or run({'test', '-L', path}).ok end
 local function within(path, root) return path:sub(1, #root + 1) == root .. '/' end
-local root_arg = rex.args.worktrees_root or ((os.getenv('HOME') or '') .. '/.lazyrex/worktrees')
+local root_arg = app.args.worktrees_root or ((os.getenv('HOME') or '') .. '/.lazyrex/worktrees')
 if root_arg:sub(1, 1) ~= '/' then fail('invalid_input', 'The worktree root must be absolute') end
 -- A lab passes an isolated root explicitly. The production default is ~/.lazyrex/worktrees.
 checked({'mkdir', '-p', root_arg})
@@ -110,15 +94,15 @@ local function catalog()
   state.owners = nil
   return state, r.rev
 end
--- A caller is the user (the view path) or an agent (hub.identify). aliases are the agent ID and its
--- legacy IDs after an identity migration, current first. An operation ID is part(actor)..part(key).
+-- A caller is the user (the view path) or an agent (the SDK ctx). aliases are the agent ID and its
+-- legacy IDs (ctx.aliases) after an identity migration, current first. An operation ID is part(actor)..part(key).
 local user_caller = {agent = 'user', aliases = {'user'}, user = true}
-local function agent_caller(who)
-  local aliases, seen = {who.agent}, {[who.agent] = true}
-  for _, id in ipairs(type(who.legacy) == 'table' and who.legacy or {}) do
+local function agent_caller(ctx)
+  local aliases, seen = {ctx.agent}, {[ctx.agent] = true}
+  for _, id in ipairs(type(ctx.aliases) == 'table' and ctx.aliases or {}) do
     if type(id) == 'string' and id ~= '' and not seen[id] then aliases[#aliases + 1] = id; seen[id] = true end
   end
-  return {agent = who.agent, aliases = aliases, session = who.session_id}
+  return {agent = ctx.agent, aliases = aliases, session = ctx.session_id}
 end
 local function save(state, rev, op)
   local args = {ops = {{key = 'catalog', if_rev = rev, value = state}}}
@@ -163,7 +147,7 @@ local function mutation(id, op, args)
     op.phase = 'sending'
     op.session = plugin_session
     local state, rev = catalog()
-    op.label = 'lazyrex-worktree:' .. instance_id .. ':' .. rev
+    op.label = 'lazyrex-worktree:' .. app.instance_id .. ':' .. rev
     state.pending[id] = op
     save(state, rev)
     local command = {'/usr/bin/env'}
@@ -515,7 +499,7 @@ local function workers_key(workers)
   table.sort(rows)
   return table.concat(rows, '|')
 end
-local function invalidate() hub('hub.ui.invalidate', {}) end
+local invalidate = app.refresh
 -- listed gives the trees of one recorded repository, or nil and the Git error when Git cannot list
 -- them (the repository was deleted or moved). Only that Git error is caught: any other error, for
 -- example a process that does not start, fails the refresh.
@@ -971,7 +955,6 @@ local function submit_worktree(args)
   if route == '/forms/new-worktree' then kind = 'create'; node = 'new_worktree'
   elseif route == '/forms/remove-worktree' then kind = 'remove'; node = 'remove_worktree'
   else return nil end
-  if args.user ~= 'user' then fail('refused', 'Only the user can submit a worktree form') end
   if args.node_id ~= node or args.action ~= 'submit' then fail('invalid_input', 'Unknown worktree form action') end
   local values = type(args.input) == 'table' and args.input.values or nil
   if type(values) ~= 'table' then fail('invalid_input', 'Worktree form values are required') end
@@ -1560,7 +1543,6 @@ local function ui_action(args)
       return {form = '/forms/worktrees-more?start=' .. more_start(args.node_id:sub(6))}
     end
     if args.action == 'discard' and type(args.node_id) == 'string' and args.node_id:sub(1, 8) == 'pending/' then
-      if args.user ~= 'user' then fail('refused', 'Only the user can discard an operation') end
       local result = discard_request(user_caller, {id = args.node_id:sub(9)}, args.operation_key); refresh_safe(); return result
     end
   elseif base == '/forms/worktree' and args.node_id == 'worktree_menu' and args.action == 'run' then
@@ -1589,7 +1571,6 @@ local function ui_action(args)
   elseif base == '/forms/remove-worktree' and args.node_id == 'remove_worktree' and args.action == 'submit' then
     return submit_worktree(args)
   elseif base == '/forms/forget-repository' and args.node_id == 'forget_repository' and args.action == 'submit' then
-    if args.user ~= 'user' then fail('refused', 'Only the user can submit a worktree form') end
     local values = type(args.input) == 'table' and args.input.values or nil
     if type(values) ~= 'table' then fail('invalid_input', 'Forget form values are required') end
     -- The submit accepts the workers that the form showed. A changed set shows the form again.
@@ -1607,110 +1588,101 @@ local function ui_action(args)
 end
 
 local actions = {
-  {name = 'worktree.create', kind = 'client', title = 'Create a worktree',
+  {name = 'worktree.create', title = 'Create a worktree',
     description = 'Create a worktree under ~/.lazyrex/worktrees/<repo>-<id>/<branch> (id: 6 hex digits from the Git directory path), or return the linked tree of the branch that already exists under that root, also at an older path. base applies to a new branch. Choose a key and preserve the request on retry. A running result requires a same-key retry to obtain the final result.',
     args = {type = 'object', properties = {repo = {type = 'string'}, branch = {type = 'string'}, base = {type = 'string'}, key = {type = 'string'}}, required = {'repo', 'branch', 'key'}, additionalProperties = false}},
-  {name = 'worktree.list', kind = 'client', title = 'List worktrees',
+  {name = 'worktree.list', title = 'List worktrees',
     description = 'List worktrees, dirty state, and workers. Omit repo for repositories recorded by this plugin. repo must be an absolute Git worktree directory; it filters only worktrees. worktrees: the latest scan, sorted by path, at most 50 entries and 16 KiB a page; an entry too large for a page has compact = true and workers_count instead of workers (hub.workers lists the workers). operations: every pending worktree operation (id, kind, phase, path, branch, actor if known), sorted by id, at most 50 entries and 24 KiB a page; an entry too large has compact = true. A list is absent when its page is empty. When worktrees_next or operations_next is present, call again with worktrees_after or operations_after set to it for the next page; a cursor is a position, and a list can change between pages. A call with a cursor reads the latest scan and starts a scan only if there is none. Paging changes nothing. error text is at most 1024 bytes.',
     args = {type = 'object', properties = {repo = {type = 'string'}, worktrees_after = {type = 'string', minLength = 1}, operations_after = {type = 'string', minLength = 1}}, additionalProperties = false}},
-  {name = 'worktree.remove', kind = 'client', title = 'Remove a worktree',
+  {name = 'worktree.remove', title = 'Remove a worktree',
     description = 'Remove a managed linked worktree, also one that another agent or the user created. Refuse changes, ignored files, workers, and terminal panes in the tree. A running result requires a same-key retry. Never force removal or delete a branch. Preserve key and path on retry. A recorded refusal needs a new key after its cause is fixed.',
     args = {type = 'object', properties = {path = {type = 'string'}, key = {type = 'string'}}, required = {'path', 'key'}, additionalProperties = false}},
-  {name = 'worktree.open', kind = 'client', title = 'Open a worktree',
+  {name = 'worktree.open', title = 'Open a worktree',
     description = 'Start a profile (default shell; hub.profiles lists them, for example an agent) with the worktree as its directory, in a new tab of your session (where=tab) or in a new session (where=session). After worktree.create, open a shell with this action, as the New Worktree form does. You own the worker (hub.stop). Choose a key; after an unknown outcome or a running result, retry with the same key and content.',
     args = {type = 'object', properties = {path = {type = 'string', minLength = 1}, where = {type = 'string', enum = {'tab', 'session'}},
       profile = {type = 'string', minLength = 1}, title = {type = 'string', maxLength = 60},
       args = {type = 'object', additionalProperties = {type = 'string', maxLength = 16000}}, key = {type = 'string', minLength = 1, maxLength = 114}},
       required = {'path', 'key'}, additionalProperties = false}},
-  {name = 'worktree.discard', kind = 'client', title = 'Discard a stopped worktree operation',
+  {name = 'worktree.discard', title = 'Discard a stopped worktree operation',
     description = 'Discard a pending worktree operation (create or remove) that stopped. Name it with exactly one of: id, the full operation ID of any pending operation (worktree.list operations); or operation, the key of your own operation. Refused while its Git process runs or its start is unknown. Result: status discarded, or status complete when the operation had already ended by itself (its own key returns its result). key is the key of this discard; retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {operation = {type = 'string', minLength = 1}, id = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
       required = {'key'}, additionalProperties = false}},
-  {name = 'worktree.forget', kind = 'client', title = 'Forget a repository',
+  {name = 'worktree.forget', title = 'Forget a repository',
     description = 'Remove a recorded repository from worktree.list and the panel. Nothing on disk changes: no file, branch, worktree or process. repo is the recorded repository path (a worktree.list row whose path equals its repo). Refused while an unfinished operation uses the repository, while a worker is inside the repository path or a tree that Git lists, and while a worker has an unknown directory. When Git cannot list the repository, workers outside every listable recorded repository may use it: the call fails with needs_confirmation and lists them; call again with the same key and accept_unattributed = true. A later worktree.create records the repository again. Choose a key; a same-key retry returns the saved result. A refusal is not saved.',
     args = {type = 'object', properties = {repo = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}, accept_unattributed = {type = 'boolean'}},
       required = {'repo', 'key'}, additionalProperties = false}},
 }
-local exports = {'worktree.create', 'worktree.list', 'worktree.remove', 'worktree.open', 'worktree.discard', 'worktree.forget'}
-for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
-  actions[#actions + 1] = {name = name, kind = 'client', title = name, args = {type = 'object', additionalProperties = true}}
-end
--- Only the hub can assert the original caller for a forwarded public action.
-actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward an agent action',
-  args = {type = 'object', properties = {action = {type = 'string'}, args = {type = 'object'}, requester_pid = {type = 'integer'}},
-    required = {'action', 'args', 'requester_pid'}, additionalProperties = false}}
-rex.call('client.keymap', {actions = actions})
-hub('hub.register', {plugin = 'worktrees', instance_id = instance_id, exports = exports, commands = {
-  {id = 'worktrees', title = 'Worktrees…', description = 'List worktrees, with the source repository first', keywords = {'git', 'branch'},
-    surface = 'panel', landing = true, route = '/panels/worktrees', user_only = 'navigation'},
-  {id = 'new_worktree', title = 'New Worktree…', description = 'Create a worktree for a branch', keywords = {'git', 'branch'}, route = '/forms/new-worktree', action = 'worktree.create'},
-  {id = 'remove_worktree', title = 'Remove Worktree…', description = 'Remove a managed worktree', keywords = {'git', 'branch'}, route = '/forms/remove-worktree', action = 'worktree.remove'}}})
--- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel.
-hub('hub.ui.tabs', {tabs = {}})
-rex_ok('session.attach', {session_id = plugin_session, event_scope = 'session'})
--- The startup work runs after the main chunk, so the main chunk runs no pcall: on Rex
--- 0.0.1792158932-g88fd41, a catch in the main chunk splits module-level locals between the closures
--- made before and after it (hub docs/rex-protocol.md, "Rex Lua runtime"). start() either completes
--- or raises the catalog error and stays incomplete; the next action calls it again. A completed
--- operation can leave an unlock pending after a lost hub reply: each cleanup has its own catch, and
--- a failed one stays in phase cleanup (a same-key replay, a discard or the next start ends it).
--- The state is a table field, not an upvalue that a closure writes.
-local startup = {complete = false}
+-- The startup work runs after the main chunk and the SDK's registration (both rex.after(0), in
+-- order), so the main chunk runs no pcall: on Rex 0.0.1792158932-g88fd41, a catch in the main
+-- chunk splits module-level locals between the closures made before and after it (hub
+-- docs/rex-protocol.md, "Rex Lua runtime"). start() either completes or raises the catalog error
+-- and stays incomplete; each handler calls it first, so a failed startup read fails the action and
+-- nothing dispatches. A completed operation can leave an unlock pending after a lost hub reply: each
+-- cleanup has its own catch, and a failed one stays in phase cleanup (a same-key replay, a discard
+-- or the next start ends it). The state is a table field, not an upvalue that a closure writes.
+local startup = {complete = false, tabs = false}
 local function start()
   if startup.complete then return end
+  -- Worktrees has no tab (the maintainer, 2026-10-17): palette commands and a side panel. The hub
+  -- accepts hub.ui.tabs only from a registered instance, so it waits for the SDK's registration.
+  if not startup.tabs then hub('hub.ui.tabs', {tabs = {}}); startup.tabs = true end
   local state = catalog()
   for id, op in pairs(state.pending) do if op.phase == 'cleanup' then pcall(cleanup_done, id) end end
   startup.complete = true
   refresh_safe()
 end
-rex.on('client_perform_requested', function(ctx, ev)
-  local call_id = ev.call_id
-  local ok, result = pcall(function()
-    -- Startup comes first: a failed startup catalog read fails the action, and nothing dispatches.
-    start()
-    -- on_behalf (hub.spawn): the hub accepts the requester PID only while this forward is in flight.
-    local forwarded_pid
-    if ev.action == 'hub.forward' then
-      if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub forwards agent actions') end
-      local forwarded = ev.args or {}
-      local exported = false
-      for _, name in ipairs(exports) do if name == forwarded.action then exported = true end end
-      if not exported then fail('refused', 'The forwarded action is not exported') end
-      if type(forwarded.requester_pid) ~= 'number' or forwarded.requester_pid <= 0 or forwarded.requester_pid % 1 ~= 0 then
-        fail('invalid_input', 'A positive requester PID is required')
-      end
-      forwarded_pid = forwarded.requester_pid
-      ev = {action = forwarded.action, args = forwarded.args,
-        requester = {principal = {kind = 'peer', pid = forwarded.requester_pid}}}
-    end
-    local args = ev.args or {}
-    if ev.action:sub(1, 5) == 'view.' or ev.action == 'hub.changed' then
-      if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub calls view actions') end
-      if ev.action == 'view.render' then return ui_render(args) end
-      if ev.action == 'hub.changed' and args.what == 'workers' then notify('workers') end
-      if ev.action == 'view.seen' and args.reason == 'focus' then notify('always') end
-      if ev.action == 'view.action' then return ui_action(args) end
-      return {}
-    end
-    local principal = ev.requester and ev.requester.principal
-    if not principal or principal.kind ~= 'peer' or type(principal.pid) ~= 'number' then fail('refused', 'A local requester PID is required') end
-    local who = hub('hub.identify', {pid = principal.pid})
-    if not who.found then fail('refused', 'The hub does not recognize this agent') end
-    local caller = agent_caller(who)
-    if ev.action == 'worktree.create' then local result = mutate(caller, 'create', args); if result.status ~= 'running' then refresh_safe() end; return result end
-    if ev.action == 'worktree.remove' then local result = mutate(caller, 'remove', args); if result.status ~= 'running' then refresh_safe() end; return result end
-    if ev.action == 'worktree.list' then return list_request(args) end
-    if ev.action == 'worktree.open' then
-      local key = text(args.key, 'key')
-      return open_request(caller, args, {spawn = 'worktree-open/' .. key, ensure = 'agent-open/' .. part(caller.agent) .. part(key)}, nil, forwarded_pid)
-    end
-    if ev.action == 'worktree.forget' then local result = forget(caller, args); refresh_safe(); return result end
-    if ev.action == 'worktree.discard' then local result = discard_request(caller, {operation = args.operation, id = args.id}, args.key); refresh_safe(); return result end
-    fail('not_supported', 'Unknown worktree action')
-  end)
-  rex.call('client.reply', {call_id = call_id, result = ok and result or nil,
-    error = not ok and (type(result) == 'table' and result or {code = 'internal', message = tostring(result)}) or nil})
-end)
-rex.call('client.set_label', {label = 'lazyrex-plugin:worktrees'})
--- The first start: after every closure and the handler exist. Its error waits for the next action.
+local function started(fn) return function(ctx, args) start(); return fn(ctx, args) end end
+
+-- Worktrees keeps its own operation records and saved results (hub.store), so no handler uses an
+-- SDK transaction or a saved reply: tx = false, store = false. The SDK gives the key as ctx.key.
+local raw = {tx = false, store = false}
+local handlers = {
+  ['worktree.create'] = function(ctx, args)
+    args.key = ctx.key
+    local result = mutate(agent_caller(ctx), 'create', args)
+    if result.status ~= 'running' then refresh_safe() end
+    return result
+  end,
+  ['worktree.list'] = function(ctx, args) return list_request(args) end,
+  ['worktree.remove'] = function(ctx, args)
+    args.key = ctx.key
+    local result = mutate(agent_caller(ctx), 'remove', args)
+    if result.status ~= 'running' then refresh_safe() end
+    return result
+  end,
+  -- on_behalf (hub.spawn): the hub accepts the requester PID only while this forward is in flight.
+  ['worktree.open'] = function(ctx, args)
+    args.key = ctx.key
+    local caller, key = agent_caller(ctx), text(ctx.key, 'key')
+    return open_request(caller, args, {spawn = 'worktree-open/' .. key, ensure = 'agent-open/' .. part(caller.agent) .. part(key)}, nil, ctx.requester_pid)
+  end,
+  ['worktree.discard'] = function(ctx, args)
+    local result = discard_request(agent_caller(ctx), {operation = args.operation, id = args.id}, ctx.key)
+    refresh_safe()
+    return result
+  end,
+  ['worktree.forget'] = function(ctx, args)
+    args.key = ctx.key
+    local result = forget(agent_caller(ctx), args)
+    refresh_safe()
+    return result
+  end,
+}
+for _, a in ipairs(actions) do
+  app.action(a.name, a.args, started(handlers[a.name]), {tx = false, store = false, title = a.title, description = a.description})
+end
+
+-- The panel and the forms are raw views: the panel pages and the forms build their own trees.
+local views = {render = started(function(ctx, args) return ui_render(args).tree end),
+  ['view.action'] = started(function(ctx, args) return ui_action(args) end)}
+app.view('/panels/worktrees', views, raw)
+app.view('/forms/*', views, raw)
+app.on('hub.changed', started(function(args) if args.what == 'workers' then notify('workers') end end), raw)
+app.on('view.seen', started(function(args) if args.reason == 'focus' then notify('always') end end), raw)
+app.command({id = 'worktrees', title = 'Worktrees…', description = 'List worktrees, with the source repository first', keywords = {'git', 'branch'},
+  surface = 'panel', landing = true, route = '/panels/worktrees', user_only = 'navigation'})
+app.command({id = 'new_worktree', title = 'New Worktree…', description = 'Create a worktree for a branch', keywords = {'git', 'branch'}, route = '/forms/new-worktree', action = 'worktree.create'})
+app.command({id = 'remove_worktree', title = 'Remove Worktree…', description = 'Remove a managed worktree', keywords = {'git', 'branch'}, route = '/forms/remove-worktree', action = 'worktree.remove'})
+rex_ok('session.attach', {session_id = plugin_session, event_scope = 'session'})
+-- The first start: after every closure and the SDK's registration. Its error waits for the next action.
 rex.after(0, function() pcall(start) end)

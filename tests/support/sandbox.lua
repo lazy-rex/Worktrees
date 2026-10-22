@@ -53,14 +53,45 @@ return function(plugin_dir, base)
     end,
   }
   local env = setmetatable({rex = stub, pcall = function(...) s.pcalls = s.pcalls + 1; return pcall(...) end}, {__index = base})
+  -- The SDK (require('lazyrex')) loads with the same stub, from the LazyRex checkout of the test run
+  -- (H.args.lib is <checkout>/lab/test; the hub starts the plugin with <checkout>/sdk/lua).
+  local checkout = assert(base.H.args.lib:match('^(.*)/lab/test/?$'), 'the LazyRex checkout is unknown')
+  local sdk = assert(loadfile(checkout .. '/sdk/lua/lazyrex.lua'))
+  setfenv(sdk, env)
+  local lazyrex = sdk()
+  env.require = function(name) if name == 'lazyrex' then return lazyrex end return base.require(name) end
   local chunk = assert(loadfile(plugin_dir .. '/worktrees.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)
   s.load_pcalls = s.pcalls
   function s:perform(action, args, requester)
     self.reply = nil
+    -- The hub sends each view call with the user (the SDK refuses one without it).
+    if action:sub(1, 5) == 'view.' and type(args) == 'table' and args.user == nil then args.user = 'user' end
     self.handlers.client_perform_requested({}, {requester = requester or {client_id = 'hub'}, action = action, call_id = 'c', args = args})
     return self.reply
+  end
+  -- find_local finds a table local of the plugin by name (and check, if given): an upvalue of a
+  -- closure that the SDK holds, also through the SDK's tables. It skips the environment and the stub.
+  function s:find_local(name, check)
+    local seen = {[base] = true, [env] = true, [stub] = true}
+    local function walk(v)
+      if seen[v] then return nil end
+      seen[v] = true
+      if type(v) == 'function' then
+        for i = 1, 255 do
+          local n, x = debug.getupvalue(v, i)
+          if not n then break end
+          if n == name and type(x) == 'table' and (not check or check(x)) then return x end
+          if type(x) == 'function' or type(x) == 'table' then local found = walk(x); if found then return found end end
+        end
+      else
+        for _, x in pairs(v) do
+          if type(x) == 'function' or type(x) == 'table' then local found = walk(x); if found then return found end end
+        end
+      end
+    end
+    return walk(self.handlers.client_perform_requested)
   end
   -- tick runs the timers armed so far; a timer that a callback arms waits for the next tick.
   function s:tick()

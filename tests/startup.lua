@@ -1,7 +1,7 @@
 -- Startup (sandbox, tests/support/sandbox.lua): the startup work runs after the main chunk, so the
 -- main chunk runs no pcall. start() completes or fails with the catalog error and stays incomplete.
--- Each action calls it first: a failed startup read fails the action with that error, and nothing
--- dispatches. After a successful read, each pending cleanup runs once, then one refresh.
+-- Each handler calls it first: a failed startup read fails the action with that error, and the
+-- handler does nothing. The SDK identifies an agent (hub.identify, a read) before the handler runs. After a successful read, each pending cleanup runs once, then one refresh.
 local tests_dir = H.args.file:match('^(.*)/[^/]*$')
 local load_sandbox = load_fixture(tests_dir .. '/support/sandbox.lua')
 local base = getfenv(1)
@@ -51,7 +51,7 @@ test('an action before the startup timer runs after the cleanup; the timer then 
   local reply = list(s)
   expect(reply.result ~= nil, 'the list answers').to_be(true)
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
-  expect(index(s, 'hub.cwd.unlock') < index(s, 'hub.identify'), 'the cleanup before the dispatch').to_be(true)
+  expect(index(s, 'hub.identify') < index(s, 'hub.cwd.unlock'), 'the SDK identifies the caller, then the handler starts').to_be(true)
   local unlocks, gets = count(s, 'hub.cwd.unlock'), count(s, 'hub.store.get')
   s:tick()
   expect(count(s, 'hub.cwd.unlock')).to_be(unlocks)
@@ -67,7 +67,7 @@ test('a failed timer attempt stays incomplete: the next action retries and clean
   local reply = list(s)
   expect(reply.result ~= nil, 'the retry succeeds').to_be(true)
   expect(count(s, 'hub.cwd.unlock')).to_be(1)
-  expect(index(s, 'hub.cwd.unlock') < index(s, 'hub.identify'), 'the cleanup before the dispatch').to_be(true)
+  expect(index(s, 'hub.identify') < index(s, 'hub.cwd.unlock'), 'the SDK identifies the caller, then the handler starts').to_be(true)
   expect(s.catalog.pending[id]).to_be(nil)
   list(s)
   expect(count(s, 'hub.cwd.unlock'), 'no second cleanup').to_be(1)
@@ -77,7 +77,7 @@ test('a failed startup read fails the action with its code and message, and noth
   local s = sandbox()
   s.reads.fail = 1
   expect_store_down(list(s))
-  expect(count(s, 'hub.identify'), 'no dispatch').to_be(0)
+  expect(count(s, 'hub.identify'), 'only the SDK identified the caller').to_be(1)
   expect(count(s, 'hub.workers'), 'no refresh').to_be(0)
   expect(count(s, 'hub.cwd.unlock')).to_be(0)
   -- The timer is the next start; its read succeeds.
@@ -94,7 +94,7 @@ test('persistent read failures fail every action without cleanup; after recovery
   expect_store_down(s:perform('hub.changed', {what = 'workers'}))
   expect_store_down(list(s))
   expect(count(s, 'hub.cwd.unlock')).to_be(0)
-  expect(count(s, 'hub.identify')).to_be(0)
+  expect(count(s, 'hub.identify'), 'one for each list; hub.changed has no caller').to_be(2)
   expect(#s.timers, 'a failed notification arms no refresh').to_be(0)
   s.reads.fail = 0
   expect(list(s).result ~= nil).to_be(true)

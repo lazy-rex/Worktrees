@@ -71,12 +71,16 @@ local function workers_error(text)
 end
 
 test('a hub error without a code, or with timeout, disconnected or unavailable, stays unavailable (sandbox)', function()
-  for _, text in ipairs({hub_text('connection reset'), hub_text('deadline', 504, 'timeout'),
-      hub_text('gone', 503, 'disconnected'), hub_text('busy', 503, 'unavailable')}) do
+  for _, text in ipairs({hub_text('connection reset'), hub_text('deadline', 504, 'timeout'), hub_text('gone', 503, 'disconnected')}) do
     local e = workers_error(text)
     expect(e.code, text).to_be('unavailable')
     expect(e.message, text).to_be(text)
   end
+  -- The code unavailable is the hub's own: the SDK keeps it and drops the transport prefix, as for
+  -- any other code.
+  local e = workers_error(hub_text('busy', 503, 'unavailable'))
+  expect(e.code).to_be('unavailable')
+  expect(e.message).to_be('busy')
 end)
 
 test('a hub error with another code keeps that code and the message without the transport prefix (sandbox)', function()

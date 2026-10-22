@@ -85,6 +85,10 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 
 The plugin loads its other files from its own directory, so keep them together.
 
+The plugin runs on the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). The hub starts it
+through the SDK's `boot.lua`, so the hub must have the SDK launcher. The plugin keeps its records in
+`hub.store` for now; the move to `hub.sql` follows.
+
 ## Tests
 
 The tests are Lua files in `tests/`. The LazyRex hub runs them:

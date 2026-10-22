@@ -56,21 +56,7 @@ end
 local function top(i) return string.format('/s%02d', i) end
 -- snapshots returns the plugin's snapshots table (debug.getupvalue, as scans.lua reads scans).
 local function snapshots(s)
-  local seen = {}
-  local function find(fn)
-    if seen[fn] then return nil end
-    seen[fn] = true
-    for i = 1, 255 do
-      local name, v = debug.getupvalue(fn, i)
-      if not name then return nil end
-      if name == 'snapshots' and type(v) == 'table' then return v end
-      if type(v) == 'function' then
-        local found = find(v)
-        if found then return found end
-      end
-    end
-  end
-  return assert(find(s.handlers.client_perform_requested), 'the snapshots table')
+  return assert(s:find_local('snapshots'), 'the snapshots table')
 end
 local function ui_count(s)
   local n = 0

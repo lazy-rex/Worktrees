@@ -124,21 +124,7 @@ end)
 -- queued returns the number of jobs in the plugin's scan queue. A job that waits starts nothing,
 -- so only the queue shows it: the test reads the plugin's own scans table (debug.getupvalue).
 local function queued(s)
-  local seen = {}
-  local function find(fn)
-    if seen[fn] then return nil end
-    seen[fn] = true
-    for i = 1, 255 do
-      local name, v = debug.getupvalue(fn, i)
-      if not name then return nil end
-      if name == 'scans' and type(v) == 'table' and v.queue then return v end
-      if type(v) == 'function' then
-        local found = find(v)
-        if found then return found end
-      end
-    end
-  end
-  local scans = find(s.handlers.client_perform_requested)
+  local scans = s:find_local('scans', function(v) return v.queue ~= nil end)
   assert_true(scans, 'the plugin scan queue is found')
   return scans.last - scans.first + 1
 end
