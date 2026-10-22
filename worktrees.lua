@@ -102,6 +102,8 @@ db.migrate {
   'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
   'CREATE TABLE reservations (key TEXT PRIMARY KEY, record TEXT NOT NULL)',
   'CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)',
+  -- The values of one write that do not fit a statement (write).
+  'CREATE TABLE staging (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)',
 }
 -- rows reads every row of a query; a reply that the hub cut (about 1 MB) is an error.
 local function rows(sql, ...)
@@ -124,12 +126,18 @@ local function pending_op(id)
   return r and json.decode(r.op) or nil
 end
 -- One request is at most 64 KiB (a reply is at most about 1 MB, so a read needs no pieces). A
--- record that a caller sent can be larger once it is JSON inside a SQL parameter (an open request
--- of 16000 quotes gives 64000 bytes). So put writes the last column of a row in pieces of at most
--- piece_bytes of encoded JSON, at UTF-8 character boundaries: the INSERT has the first piece, and an
--- UPDATE appends each next piece. write sends batches of at most batch_bytes; more than one batch
--- runs in one transaction, so no read sees a part of a row.
-local piece_bytes, batch_bytes = 16384, 49152
+-- value can be larger once it is JSON inside a SQL parameter: an open request of 16000 quotes
+-- gives 64000 bytes, and a key of an older version can have 25000 quotes. So write never sends a
+-- large value as a parameter of its statement. It writes each value over inline_bytes of encoded
+-- JSON to a row of the staging table first, in pieces of at most piece_bytes (at UTF-8 character
+-- boundaries): an INSERT with the first piece, then an UPDATE that appends each next one. The
+-- statement reads the value from its row ((SELECT value FROM staging WHERE slot = n)), and the
+-- last statement empties the table. So each statement has at most piece_bytes plus a few short
+-- values. write measures each batch as the SDK sends it: the request envelope (the client ID, a
+-- transaction token of 32 hex digits, the action) and each statement {sql, params}; it keeps
+-- spare_bytes for a field that the SDK can add (the render ID). More than one batch runs in one
+-- transaction, so no read sees a part of a write, and no staging row stays.
+local inline_bytes, piece_bytes, request_bytes, spare_bytes = 1024, 16384, 65536, 1024
 -- back moves j back to the end of a UTF-8 character (never before i).
 local function back(text, i, j)
   while j > i and j < #text and text:byte(j + 1) >= 0x80 and text:byte(j + 1) < 0xC0 do j = j - 1 end
@@ -145,56 +153,64 @@ local function pieces(text)
   until i > #text
   return out
 end
--- put gives the statements that write one row: verb (INSERT or INSERT OR REPLACE), the table, the
--- columns (the key first, the long text last) and their values.
-local function put(verb, t, columns, values)
-  local list = pieces(values[#values])
-  local first = {}
-  for i = 1, #values - 1 do first[i] = values[i] end
-  first[#values] = list[1]
-  local marks = string.rep('?, ', #columns - 1) .. '?'
-  local out = {{verb .. ' INTO ' .. t .. ' (' .. table.concat(columns, ', ') .. ') VALUES (' .. marks .. ')', unpack(first)}}
-  local last = columns[#columns]
-  for i = 2, #list do
-    out[#out + 1] = {'UPDATE ' .. t .. ' SET ' .. last .. ' = ' .. last .. ' || ? WHERE ' .. columns[1] .. ' = ?', list[i], values[1]}
-  end
+-- encoded gives the size of a statement as the SDK sends it ({sql, params}), with its comma.
+local function encoded(s) return #json.encode({sql = s[1], params = {unpack(s, 2)}}) + 1 end
+-- staged gives the statements that run statement s ({sql, values for its ? marks in order}): a
+-- value over inline_bytes goes to the staging row state.slot + 1 (and the next ones).
+local function staged(s, state)
+  local out, values, params = {}, {unpack(s, 2)}, {}
+  local marks = {i = 0}
+  local sql = s[1]:gsub('%?', function()
+    marks.i = marks.i + 1
+    local v = values[marks.i]
+    if type(v) ~= 'string' or #json.encode(v) <= inline_bytes then
+      params[#params + 1] = v
+      return '?'
+    end
+    state.slot = state.slot + 1
+    for n, piece in ipairs(pieces(v)) do
+      if n == 1 then out[#out + 1] = {'INSERT INTO staging (slot, value) VALUES (?, ?)', state.slot, piece}
+      else out[#out + 1] = {'UPDATE staging SET value = value || ? WHERE slot = ?', piece, state.slot} end
+    end
+    return '(SELECT value FROM staging WHERE slot = ' .. state.slot .. ')'
+  end)
+  out[#out + 1] = {sql, unpack(params)}
   return out
 end
--- batches splits statements into batches of at most batch_bytes, measured as the SDK sends each
--- statement ({sql, params}) with its comma. The rest of the request (the action, the client and
--- transaction IDs) fits in the other 16 KiB.
-local function batches(statements)
-  local out, batch, size = {}, {}, 0
+-- write commits lists of statements (each argument is a list of {sql, values...}) as one unit.
+local function write(...)
+  local statements, state = {}, {slot = 0}
+  for _, list in ipairs({...}) do
+    for _, s in ipairs(list) do
+      for _, x in ipairs(staged(s, state)) do statements[#statements + 1] = x end
+    end
+  end
+  if state.slot > 0 then statements[#statements + 1] = {'DELETE FROM staging'} end
+  local envelope = #json.encode({client_id = app.hub_id, action = 'hub.sql.batch', args = {statements = {}, tx = string.rep('0', 32)}, timeout_ms = 10000})
+  local limit = request_bytes - spare_bytes - envelope
+  local list, batch, size = {}, {}, 0
   for _, s in ipairs(statements) do
-    local n = #json.encode({sql = s[1], params = {unpack(s, 2)}}) + 1
-    if #batch > 0 and size + n > batch_bytes then out[#out + 1] = batch; batch, size = {}, 0 end
+    local n = encoded(s)
+    if n > limit then fail('internal', 'A statement has ' .. n .. ' bytes; the limit is ' .. limit) end
+    if #batch > 0 and size + n > limit then list[#list + 1] = batch; batch, size = {}, 0 end
     batch[#batch + 1] = s
     size = size + n
   end
-  if #batch > 0 then out[#out + 1] = batch end
-  return out
-end
--- write commits lists of statements (each argument is a list) as one unit.
-local function write(...)
-  local statements = {}
-  for _, list in ipairs({...}) do
-    for _, s in ipairs(list) do statements[#statements + 1] = s end
-  end
-  local list = batches(statements)
+  if #batch > 0 then list[#list + 1] = batch end
   if #list <= 1 then
     if list[1] then db.batch(list[1]) end
     return
   end
-  db.transaction(function() for _, batch in ipairs(list) do db.batch(batch) end end)
+  db.transaction(function() for _, b in ipairs(list) do db.batch(b) end end)
 end
-local function put_pending(id, op) return put('INSERT OR REPLACE', 'pending', {'id', 'op'}, {id, json.encode(op)}) end
+local function put_pending(id, op) return {{'INSERT OR REPLACE INTO pending (id, op) VALUES (?, ?)', id, json.encode(op)}} end
 local function saved_op(key)
   local r = db.first('SELECT fingerprint, result FROM ops WHERE key = ?', key)
   if not r then return {found = false} end
   return {found = true, fingerprint = r.fingerprint, result = json.decode(r.result)}
 end
 local function save_op(key, fingerprint, result)
-  return put('INSERT', 'ops', {'key', 'fingerprint', 'result'}, {key, fingerprint, json.encode(result)})
+  return {{'INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', key, fingerprint, json.encode(result)}}
 end
 -- reservation gives the record of the first key of keys that has one (the keys of the caller's aliases).
 local function reservation(keys)
@@ -203,7 +219,7 @@ local function reservation(keys)
     if r then return json.decode(r.record), key end
   end
 end
-local function reservation_row(key, record) return put('INSERT OR REPLACE', 'reservations', {'key', 'record'}, {key, json.encode(record)}) end
+local function reservation_row(key, record) return {{'INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(record)}} end
 local function put_reservation(key, record) write(reservation_row(key, record)) end
 -- A caller is the user (the view path) or an agent (the SDK ctx). aliases are the agent ID and its
 -- legacy IDs (ctx.aliases) after an identity migration, current first. An operation ID is part(actor)..part(key).
@@ -240,7 +256,7 @@ local function cleanup_done(id)
     end
   end
   if op.kind == 'remove' then hub('hub.cwd.unlock', {path = op.path, key = id}) end
-  db.exec('DELETE FROM pending WHERE id = ?', id)
+  write({{'DELETE FROM pending WHERE id = ?', id}})
 end
 -- Rex owns each Git mutation. Keep the block until the operation result commits. The block label
 -- names the instance and the operation: an operation goes to phase sending once.
@@ -1696,7 +1712,7 @@ local function import_page(source, cursor)
   if source == 'ops' then
     local page = hub('hub.store.ops_scan', {after = after})
     for _, op in ipairs(page.ops or {}) do
-      add(put('INSERT OR REPLACE', 'ops', {'key', 'fingerprint', 'result'}, {op.key, op.fingerprint or '', json.encode(op.result)}))
+      out[#out + 1] = {'INSERT OR REPLACE INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', op.key, op.fingerprint or '', json.encode(op.result)}
     end
     return out, page.next
   end

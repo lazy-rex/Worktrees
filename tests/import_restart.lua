@@ -9,7 +9,7 @@ local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lu
 local alice = agent('alice')
 local json = rex.json
 local part = W.part
-local tables = {'repos', 'pending', 'ops', 'reservations', 'meta'}
+local tables = {'repos', 'pending', 'ops', 'reservations', 'meta', 'staging'}
 
 -- q(n) is n double quotes: each one is 2 bytes in the record JSON and 4 bytes in a request.
 local function q(n) return string.rep('"', n) end
@@ -27,6 +27,9 @@ write({{key = 'catalog', value = {repos = {['/r/.git'] = '/r'}, pending = {[pend
 write({{key = open_key, value = intent}})
 write({{key = discard_key, value = {fingerprint = q(16000), id = pending_id}}})
 put_operation{key = op_key, fingerprint = 'create/x', result = {path = '/r/done', note = q(16000)}}
+-- A key of 25000 quotes: 50000 bytes in a request, with each statement and the progress row.
+local big_key = part('alice') .. part(q(25000))
+put_operation{key = big_key, fingerprint = 'create/x', result = {path = '/r/t', note = q(6000)}}
 
 local function meta(name)
   local r = sql('SELECT value FROM meta WHERE name = ?', {name})[1]
@@ -64,6 +67,10 @@ local copied = {
     expect(#r).to_be(1)
     expect(r[1].fingerprint).to_be('create/x')
     expect(json.decode(r[1].result).note).to_be(q(16000))
+    local b = sql('SELECT fingerprint, result FROM ops WHERE key = ?', {big_key})
+    expect(#b).to_be(1)
+    expect(json.decode(b[1].result).note).to_be(q(6000))
+    expect(count('ops')).to_be(2)
   end,
 }
 local function absent(source)
@@ -79,6 +86,11 @@ local function fresh_start(arm)
   for _, t in ipairs(tables) do sql_write('DELETE FROM ' .. t) end
   local id = arm and arm()
   H.hub('hub.admin.start', {plugin = 'worktrees'})
+  local deadline = os.time() + 20
+  while not H.hub('hub.test.status', {}).plugins.worktrees.registered do
+    if os.time() >= deadline then error('the plugin did not register', 2) end
+    rex.sleep(0.1)
+  end
   return id
 end
 local function wait_consumed(id)
@@ -94,6 +106,7 @@ local function complete()
   alice:call('worktree.list', {}) -- an error here fails the case
   expect(meta('kv_import')).to_be('done')
   for _, check in ipairs(copied) do check() end
+  expect(count('staging'), 'no staging row stays').to_be(0)
 end
 
 test('records larger than one request import exactly after a crash restart', function()
@@ -115,6 +128,7 @@ for source, t in ipairs(transitions) do
     expect(meta('kv_import_progress')).to_be(source > 1 and (source .. ':') or nil)
     for i = 1, source - 1 do copied[i]() end
     for i = source, #copied do absent(i) end
+    expect(count('staging'), 'the failed page left no staging row').to_be(0)
     complete()
     -- The new process did not read the sources before the progress row again.
     if source > 1 then expect(#calls('hub.store.get'), 'the catalog is not read again').to_be(0) end

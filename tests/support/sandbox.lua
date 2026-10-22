@@ -25,7 +25,7 @@ return function(plugin_dir, base, opts)
   -- until the commit (s.tx_writes), so a rollback, or a failure before the commit, writes nothing; a
   -- query in it does not see them. sandbox() empties the tables first, so the import copies
   -- s.catalog at the first start.
-  local tables = {'repos', 'pending', 'ops', 'reservations', 'meta'}
+  local tables = {'repos', 'pending', 'ops', 'reservations', 'meta', 'staging'}
   if not opts.keep then for _, t in ipairs(tables) do base.sql_write('DELETE FROM ' .. t) end end
   s.transactions = 0
   local function sandbox_sql(action, a)

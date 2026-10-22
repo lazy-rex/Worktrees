@@ -1,7 +1,7 @@
 -- The import of the hub.store records into SQL (sandbox, tests/support/sandbox.lua; docs/sdk-port.md,
 -- section 3). The first start copies, in pages: the catalog record, the open/ and discard/
--- records, then every saved operation result. A batch is at most 48 KiB; the last batch of a page
--- writes the progress row. Only the row kv_import = done ends the import, and until then every
+-- records, then every saved operation result. Each page is one write with its progress row, in
+-- requests of at most 64 KiB. Only the row kv_import = done ends the import, and until then every
 -- read of the records fails with unavailable.
 local tests_dir = H.args.file:match('^(.*)/[^/]*$')
 local load_sandbox = load_fixture(tests_dir .. '/support/sandbox.lua')
@@ -142,7 +142,7 @@ test('a page whose commit reply was lost is not copied again: the retry starts a
   expect(count('ops'), 'each saved result once').to_be(2)
 end)
 
-test('a large catalog splits into batches of at most 48 KiB; only the last one moves the cursor', function()
+test('a large catalog splits into requests of at most 64 KiB; only the last one moves the cursor', function()
   local kv = kv_state()
   for i = 1, 40 do
     kv.catalog.pending[part('alice') .. part('big-' .. i)] = {kind = 'remove', phase = 'prepared', path = '/sandbox/worktrees/r/big-' .. i,
@@ -152,7 +152,8 @@ test('a large catalog splits into batches of at most 48 KiB; only the last one m
   local sizes = {}
   s.hub_answers['hub.sql.batch'] = function(a)
     local text = json.encode(a.statements)
-    sizes[#sizes + 1] = {bytes = #text, progress = text:find('kv_import_progress', 1, true) ~= nil}
+    local bytes = #json.encode({client_id = 'hub', action = 'hub.sql.batch', args = a, timeout_ms = 10000})
+    sizes[#sizes + 1] = {bytes = bytes, progress = text:find('kv_import_progress', 1, true) ~= nil}
     return s.sql('batch', a)
   end
   s:tick()
@@ -161,7 +162,7 @@ test('a large catalog splits into batches of at most 48 KiB; only the last one m
   -- The catalog page: every batch but its last has no progress row.
   local first_progress
   for i, b in ipairs(sizes) do
-    expect(b.bytes <= 49152 + 512, 'batch ' .. i .. ' is within the limit: ' .. b.bytes).to_be(true)
+    expect(b.bytes <= 65536, 'batch ' .. i .. ' is within the limit: ' .. b.bytes).to_be(true)
     if b.progress and not first_progress then first_progress = i end
   end
   expect(first_progress > 1, 'the progress row comes with the last batch of the catalog page').to_be(true)
@@ -238,8 +239,46 @@ test('a failure between the batches of a page rolls the page back; the retry cop
   -- The page of open/ (with the large record) wrote nothing: the progress row is still at the start of open/.
   expect(meta('kv_import_progress')).to_be('2:')
   expect(count('reservations')).to_be(0)
+  expect(count('staging'), 'no staging row stays').to_be(0)
   expect(list(s).result ~= nil, 'the list answers after the retry').to_be(true)
   expect(meta('kv_import')).to_be('done')
   big_copied()
   expect(count('reservations')).to_be(4)
+end)
+
+-- A saved result of an older version with a key of 25000 quotes (50000 bytes in a request): the
+-- key goes unchanged into its row and into the progress row, and no request is over 64 KiB.
+test('a key of 25000 quotes imports unchanged; it is the progress cursor of the next page', function()
+  local kv = kv_state()
+  local big = part('alice') .. part(string.rep('"', 25000))
+  kv.ops[big] = {fingerprint = 'create/x', result = {path = '/r/t', note = string.rep('"', 6000)}}
+  local s = sandbox(kv, 1)
+  local state = {max = 0, failed = false}
+  for _, action in ipairs({'hub.sql.batch', 'hub.sql.exec', 'hub.sql.query'}) do
+    s.hub_answers[action] = function(a)
+      local n = #json.encode({client_id = 'hub', action = action, args = a, timeout_ms = 10000})
+      if n > state.max then state.max = n end
+      return s.sql(action:sub(9), a)
+    end
+  end
+  -- The ops page after the large key fails once: the progress row keeps that key.
+  local scan = s.hub_answers['hub.store.ops_scan']
+  s.hub_answers['hub.store.ops_scan'] = function(a)
+    if a.after == big and not state.failed then
+      state.failed = true
+      return nil, 'stream response "c" failed: store down (status=503 code=unavailable)'
+    end
+    return scan(a)
+  end
+  s:tick()
+  expect(meta('kv_import')).to_be(nil)
+  expect(meta('kv_import_progress')).to_be('4:' .. big)
+  expect(list(s).result ~= nil, 'the list answers after the retry').to_be(true)
+  expect(meta('kv_import')).to_be('done')
+  local r = sql('SELECT result FROM ops WHERE key = ?', {big})
+  expect(#r).to_be(1)
+  expect(json.decode(r[1].result).note).to_be(string.rep('"', 6000))
+  expect(count('ops')).to_be(3)
+  expect(count('staging'), 'no staging row stays').to_be(0)
+  expect(state.max <= 65536, 'the largest request: ' .. state.max).to_be(true)
 end)
