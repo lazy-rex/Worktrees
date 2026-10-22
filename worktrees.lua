@@ -1370,7 +1370,9 @@ local function render_forget(path)
   nodes[#nodes + 1] = cancel_node()
   return {title = 'Forget repository', nodes = nodes}
 end
-local function render_new(context)
+-- New Worktree (app.form, registered below): the repository of the source pane first, then the
+-- recorded repositories.
+local function new_fields(context)
   local source = repo_default(context)
   local options, seen = {}, {}
   if source then options[1] = {value = source, label = source}; seen[source] = true end
@@ -1379,14 +1381,9 @@ local function render_new(context)
   end
   local repo_field = #options > 0 and {id = 'repo', label = 'Repository', kind = 'select', required = true, value = options[1].value, options = options}
     or {id = 'repo', label = 'Repository (absolute path)', kind = 'text', required = true, value = ''}
-  return {title = 'New worktree', nodes = {
-    {id = 'new_worktree', type = 'form', fields = {repo_field,
-      {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
-      {id = 'base', label = 'Base (optional, for a new branch)', kind = 'text', value = ''}},
-      submit_action = {name = 'submit', label = 'Create worktree', enabled = true, tool = 'worktree.create'}},
-    {id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>-<id>/<branch>. The ID is 6 hex digits from the Git directory path. An existing tree of the branch in this root is used.'},
-    cancel_node(),
-  }}
+  return {repo_field,
+    {id = 'branch', label = 'Branch', kind = 'text', required = true, value = ''},
+    {id = 'base', label = 'Base (optional, for a new branch)', kind = 'text', value = ''}}
 end
 -- Without a path, the remove form is a picker. With a path, it confirms that one tree, so the
 -- advice always belongs to the tree that the submit removes.
@@ -1458,7 +1455,6 @@ local function ui_render(args)
   elseif base:match('^/forms/worktrees%-more%?') or base == '/forms/worktrees-more' then
     tree = render_more(context, more_start(base:match('^/forms/worktrees%-more%?start=(.*)$')))
   elseif base == '/forms/worktree' then tree = render_tree_menu(path)
-  elseif base == '/forms/new-worktree' then tree = render_new(context)
   elseif base == '/forms/remove-worktree' then tree = render_remove(context, path)
   elseif base == '/forms/forget-repository' then tree = render_forget(path)
   elseif base == '/forms/worktree-agent' then tree = render_profiles(path)
@@ -1597,6 +1593,21 @@ local function open_menu(args, path, where, key)
   return open_request(user_caller, {path = path, where = where, profile = 'shell'},
     {spawn = 'worktree-open/' .. key, ensure = 'open/' .. key}, args.context, nil, true)
 end
+-- The submit of New Worktree. the maintainer (2026-10-17): after New Worktree, open a shell there in a
+-- new tab. A retry replays the same Git operation and the same spawn key.
+local function new_worktree_submit(args)
+  local result = submit_worktree(args)
+  if result.status == 'running' or result.created == nil then return result end
+  local ok, effect = pcall(function()
+    return open_effect(open_menu(args, result.path, 'tab', 'created/' .. text(args.operation_key, 'operation_key')))
+  end)
+  if not ok then
+    if type(effect) ~= 'table' or not definite[effect.code] then error(effect) end
+    fail('open_failed', 'The worktree exists at ' .. result.path .. ', but its shell did not start: ' .. tostring(effect.message) .. ' Open it from the Worktrees panel.')
+  end
+  if effect.status == 'running' then return effect end
+  return result
+end
 local function ui_action(args)
   local base, path = route_path(args.route or '')
   local input = type(args.input) == 'table' and args.input or {}
@@ -1620,20 +1631,6 @@ local function ui_action(args)
     if input.item_id == 'open_tab' or input.item_id == 'open_session' then
       return open_effect(open_menu(args, path, input.item_id == 'open_session' and 'session' or 'tab', text(args.operation_key, 'operation_key')))
     end
-  elseif base == '/forms/new-worktree' and args.node_id == 'new_worktree' and args.action == 'submit' then
-    -- the maintainer (2026-10-17): after New Worktree, open a shell there in a new tab. A retry replays the
-    -- same Git operation and the same spawn key.
-    local result = submit_worktree(args)
-    if result.status == 'running' or result.created == nil then return result end
-    local ok, effect = pcall(function()
-      return open_effect(open_menu(args, result.path, 'tab', 'created/' .. text(args.operation_key, 'operation_key')))
-    end)
-    if not ok then
-      if type(effect) ~= 'table' or not definite[effect.code] then error(effect) end
-      fail('open_failed', 'The worktree exists at ' .. result.path .. ', but its shell did not start: ' .. tostring(effect.message) .. ' Open it from the Worktrees panel.')
-    end
-    if effect.status == 'running' then return effect end
-    return result
   elseif base == '/forms/remove-worktree' and not path and args.node_id == 'remove_pick' and args.action == 'select' and type(input.item_id) == 'string' then
     return {form = route_with_path('/forms/remove-worktree', input.item_id)}
   elseif base == '/forms/remove-worktree' and args.node_id == 'remove_worktree' and args.action == 'submit' then
@@ -1757,19 +1754,18 @@ local function started(fn) return function(ctx, args) start(); return fn(ctx, ar
 -- A render cannot write (SDK eb9654d), and start() writes: the import and the cleanup of finished
 -- operations. So a render before the start completes runs no start: it arms one start on a timer
 -- and fails with unavailable. When that start completes, its refresh renders the views again; when
--- it fails, the next render, action or event tries again.
-local function started_render(fn)
-  return function(ctx, args)
-    if not startup.complete then
-      if not startup.armed then
-        startup.armed = true
-        rex.after(0, function() startup.armed = false; pcall(start) end)
-      end
-      fail('unavailable', 'The worktree records are not ready yet')
-    end
-    return fn(ctx, args)
+-- it fails, the next render, action or event tries again. The fields of an app.form run at the
+-- render and again at the submit, so they call ready() too: a submit before the start completes
+-- fails with unavailable, and its retry finds the start complete.
+local function ready()
+  if startup.complete then return end
+  if not startup.armed then
+    startup.armed = true
+    rex.after(0, function() startup.armed = false; pcall(start) end)
   end
+  fail('unavailable', 'The worktree records are not ready yet')
 end
+local function started_render(fn) return function(ctx, args) ready(); return fn(ctx, args) end end
 
 -- The SDK gives the key of an agent action as ctx.key.
 local handlers = {
@@ -1812,6 +1808,13 @@ end
 local views = {render = started_render(function(ctx, args) return ui_render(args).tree end),
   ['view.action'] = started(function(ctx, args) return ui_action(args) end)}
 app.view('/panels/worktrees', views, raw)
+-- The forms on app.form come before the other forms: the SDK takes the first route that matches.
+-- A render reads only (ready, above).
+app.form('/forms/new-worktree', {id = 'new_worktree', title = 'New worktree', tx = false, store = false,
+  fields = function(ctx) ready(); return new_fields(ctx.context) end,
+  after = {{id = 'help', type = 'widget', text = 'The worktree goes in ' .. root .. '/<repo>-<id>/<branch>. The ID is 6 hex digits from the Git directory path. An existing tree of the branch in this root is used.'}},
+  submit = {label = 'Create worktree', tool = 'worktree.create'},
+  on_submit = function(ctx) return new_worktree_submit(ctx.args) end})
 app.view('/forms/*', views, raw)
 app.on('hub.changed', started(function(args) if args.what == 'workers' then notify('workers') end end), raw)
 app.on('view.seen', started(function(args) if args.reason == 'focus' then notify('always') end end), raw)
