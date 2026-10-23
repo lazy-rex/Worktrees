@@ -43,7 +43,7 @@ as its caller.
 The page budget is not a limit of the hub. The SDK sends a view over 45056 bytes (its inline
 limit) to the hub in parts, and the hub joins them. A view over 786432 bytes (768 KiB, the reply
 limit) fails with `too_large`. The hub gives both limits in the `hub.register` reply (hub release
-4.2; hub main cd53575). The forms have no page budget: only the reply limit applies to them.
+4.2; hub main cd53575). Other forms have no page budget; only the reply limit applies.
 
 ## Scans
 
