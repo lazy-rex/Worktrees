@@ -6,17 +6,19 @@ local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lu
 local repo = W.repo('faults')
 local alice = agent('alice')
 
--- joiner: an agent profile whose process joins the hub only after the gate file exists, so a test
--- sees the pending state first (the pattern of the Profiles plugin tests). The joining process is
--- the harness test agent (a copy in the lab).
+-- reporter: an agent profile whose process reports its conversation identity only after the gate
+-- file exists, so a test sees the pending state first. The report comes from a child of the pane's
+-- shell, as an agent hook does; the hub opens the spawn of that pane (spawn adoption by identity
+-- report). Then the shell stays as the agent. The reporting process is the harness test agent (a
+-- copy in the lab); $$ gives each pane its own conversation.
 local bin = H.args.lab .. '/bin/lazyrex-hub'
 W.run({'mkdir', '-p', H.args.lab .. '/bin'})
 W.run({'cp', H.args.hub_bin, bin})
-local gate = H.args.lab .. '/join-gate'
+local gate = H.args.lab .. '/report-gate'
 write_profiles({profiles = {
   {id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}},
-  {id = 'joiner', name = 'Joiner', kind = 'agent', command = {'/bin/sh', '-c',
-    'while [ ! -e "$0" ]; do sleep 0.1; done; exec "$1" testagent -id "$LAZYREX_AGENT" -join "$LAZYREX_AGENT"', gate, bin}},
+  {id = 'reporter', name = 'Reporter', kind = 'agent', command = {'/bin/sh', '-c',
+    [[while [ ! -e "$0" ]; do sleep 0.1; done; "$1" testagent report "{\"kind\":\"claude\",\"conversation_id\":\"wt-reporter-$$\",\"source\":\"startup\",\"block\":\"$REX_BLOCK\"}"; exec sleep 600]], gate, bin}},
 }})
 
 local function create(branch, key)
@@ -177,28 +179,28 @@ test('failed invalidations do not strand a scan: later changes still refresh the
   wait('a later change shows clean', function() return detail():find('clean', 1, true) end, 20)
 end)
 
-test('a pending agent spawn becomes open when its agent joins, on both paths', function()
-  -- Tool: the create answer is lost, so the pane exists and the spawn stays pending until the join.
-  local f = fault({point = 'spawn-create', mode = 'lose-answer', op = 'worktree-open/join'})
-  local first = alice:call('worktree.open', {path = tree.path, key = 'join', profile = 'joiner'})
+test('a pending agent spawn becomes open when its agent reports its identity, on both paths', function()
+  -- Tool: the create answer is lost, so the pane exists and the spawn stays pending until the report.
+  local f = fault({point = 'spawn-create', mode = 'lose-answer', op = 'worktree-open/report'})
+  local first = alice:call('worktree.open', {path = tree.path, key = 'report', profile = 'reporter'})
   expect(fault_fired(f)).to_be(true)
   expect(first.status).to_be('running')
-  expect(alice:call('worktree.open', {path = tree.path, key = 'join', profile = 'joiner'}).status).to_be('running')
+  expect(alice:call('worktree.open', {path = tree.path, key = 'report', profile = 'reporter'}).status).to_be('running')
   W.run({'touch', gate})
-  local opened = W.settle(function() return alice:call('worktree.open', {path = tree.path, key = 'join', profile = 'joiner'}) end, 'the join', 30)
+  local opened = W.settle(function() return alice:call('worktree.open', {path = tree.path, key = 'report', profile = 'reporter'}) end, 'the report', 30)
   expect(opened.status).to_be('open')
   expect(opened.spawn_id).to_be(first.spawn_id)
   W.run({'rm', gate})
-  -- View: the Start agent operation stays pending (running) until the join, then succeeds.
-  local g = fault({point = 'spawn-create', mode = 'lose-answer', op = 'worktree-agent/view-join'})
+  -- View: the Start agent operation stays pending (running) until the report, then succeeds.
+  local g = fault({point = 'spawn-create', mode = 'lose-answer', op = 'worktree-agent/view-report'})
   local m = menu(tree.path)
   m:action('worktree_menu', 'run', {item_id = 'agent'})
   local profiles = user:view(W.route('/forms/worktree-agent', tree.path))
   profiles:render()
-  profiles:action('profiles', 'select', {item_id = 'joiner'})
-  local form = user:view(W.route('/forms/worktree-agent/joiner', tree.path))
+  profiles:action('profiles', 'select', {item_id = 'reporter'})
+  local form = user:view(W.route('/forms/worktree-agent/reporter', tree.path))
   form:render()
-  local _, key = form:admit('action', {node_id = 'start_agent', action = 'submit', input = {values = {placement = 'tab'}}, revision = form.revision, operation_key = 'view-join'})
+  local _, key = form:admit('action', {node_id = 'start_agent', action = 'submit', input = {values = {placement = 'tab'}}, revision = form.revision, operation_key = 'view-report'})
   wait('the spawn is pending', function() return fault_fired(g) end, 20)
   rex.sleep(1.5)
   expect(operation(key).status).to_be('pending')
@@ -207,8 +209,8 @@ test('a pending agent spawn becomes open when its agent joins, on both paths', f
   expect(op.status).to_be('succeeded')
   local found
   for _, w in ipairs(H.hub('hub.workers', {}).workers or {}) do
-    if w.cwd == tree.path and w.profile == 'joiner' and w.parent == 'user' then found = w end
+    if w.cwd == tree.path and w.profile == 'reporter' and w.parent == 'user' then found = w end
   end
-  expect(found ~= nil and found.state ~= 'starting', 'an open user joiner worker').to_be(true)
+  expect(found ~= nil and found.state ~= 'starting', 'an open user reporter worker').to_be(true)
   W.run({'rm', gate})
 end)
