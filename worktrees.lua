@@ -119,11 +119,12 @@ db.migrate {
   'CREATE TABLE pending (id TEXT PRIMARY KEY, op TEXT NOT NULL)',
   'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
   'CREATE TABLE reservations (key TEXT PRIMARY KEY, record TEXT NOT NULL)',
-  -- meta keeps the state of the finished one-time copy of the hub.store records (kv_import = done).
-  -- This version does not read it; a rollback to v0.3.0 reads it. A later release drops it.
+  -- meta kept the state of the one-time copy of the hub.store records (v0.3.0). Step 7 drops it.
   'CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)',
   -- The values of one write that do not fit a statement (write).
   'CREATE TABLE staging (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)',
+  -- v0.4.0 does not read meta, so a rollback to v0.4.0 runs at schema 7. v0.3.0 reads it.
+  'DROP TABLE meta',
 }
 -- rows reads every row of a query; a reply that the hub cut (about 1 MB) is an error.
 local function rows(sql, ...)

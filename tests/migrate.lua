@@ -1,7 +1,7 @@
--- The schema stays at version 6 in this release: a rollback to v0.3.0 must find its tables and a
--- finished import (expand, then contract: the meta table goes one release after the code that read
--- it). A start of this version changes no table and no record, also not the meta row
--- kv_import = done.
+-- The schema: step 7 drops the meta table (the state of the removed hub.store import). A fresh
+-- database and a database at schema 6 (v0.4.0, with the meta rows that v0.3.0 left) end with the
+-- same tables and version. The upgrade keeps every record: the recorded repositories, the pending
+-- operations, the saved operation results, the reservations and the staging table.
 local W = load_fixture(H.args.file:match('^(.*)/[^/]*$') .. '/support/fixture.lua')
 local alice = agent('alice')
 local json = rex.json
@@ -13,8 +13,7 @@ local function tables()
   for _, r in ipairs(sql("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'lazyrex_%' AND name NOT LIKE 'sqlite_%' ORDER BY name")) do names[#names + 1] = r.name end
   return table.concat(names, ',')
 end
-local function meta() return json.encode(sql('SELECT name, value FROM meta ORDER BY name')) end
-local current = 'meta,ops,pending,repos,reservations,staging'
+local current = 'ops,pending,repos,reservations,staging'
 
 -- restart stops the plugin, runs fn while it is stopped, and starts it again.
 local function restart(fn)
@@ -28,34 +27,40 @@ local function restart(fn)
   end
 end
 
-test('a fresh database has schema 6 and the tables of v0.3.0', function()
+test('a fresh database has schema 7 and no meta table', function()
   alice:call('worktree.list', {})
-  expect(version()).to_be(6)
+  expect(version()).to_be(7)
   expect(tables()).to_be(current)
 end)
 
-test('a start keeps schema 6, the meta rows of the finished import and every record', function()
+test('a database at schema 6 goes to schema 7: meta goes, and every record stays', function()
   local pending_id = part('alice') .. part('p1')
+  local op_key = part('alice') .. part('done')
+  local open_key = 'open/' .. part('alice') .. part('worktree-open/o1')
+  local discard_key = 'discard/' .. part('alice') .. part('d1')
+  local before
   local pending_op = {kind = 'remove', phase = 'prepared', path = H.args.lab .. '/worktrees/x/none', fingerprint = 'remove/x',
     actor = 'alice', created_at = '2026-10-22T00:00:00Z'}
-  local before, before_meta
   restart(function()
-    -- The rows that v0.3.0 left after its import.
-    sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('kv_import', 'done')")
-    sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('kv_import_progress', '5:')")
+    sql_write('CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    sql_write("INSERT INTO meta (name, value) VALUES ('kv_import', 'done')")
+    sql_write("INSERT INTO meta (name, value) VALUES ('kv_import_progress', '5:')")
+    sql_write('PRAGMA user_version = 6')
     sql_write('INSERT INTO repos (common, repo) VALUES (?, ?)', {'/r/.git', '/r'})
     sql_write('INSERT INTO pending (id, op) VALUES (?, ?)', {pending_id, json.encode(pending_op)})
-    sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {part('alice') .. part('done'), 'create/x', json.encode({path = '/r/done'})})
-    sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {'discard/' .. part('alice') .. part('d1'), json.encode({fingerprint = 'g', id = pending_id})})
+    sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {op_key, 'create/x', json.encode({path = '/r/done'})})
+    sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {open_key, json.encode({fingerprint = 'f', actor = 'alice', phase = 'ready'})})
+    sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {discard_key, json.encode({fingerprint = 'g', id = pending_id})})
     expect(version(), 'the schema before the start').to_be(6)
-    before, before_meta = W.records(), meta()
+    expect(tables(), 'the tables before the start').to_be('meta,' .. current)
+    before = W.records()
   end)
   local list = alice:call('worktree.list', {})
-  expect(version()).to_be(6)
+  expect(version()).to_be(7)
   expect(tables()).to_be(current)
-  expect(meta(), 'the meta rows stay').to_be(before_meta)
-  expect(sql("SELECT value FROM meta WHERE name = 'kv_import'")[1].value).to_be('done')
   expect(W.records(), 'every record stays').to_be(before)
+  expect(sql('SELECT count(*) AS n FROM staging')[1].n).to_be(0)
+  -- The plugin reads the kept records: the pending operation is listed.
   local found = false
   for _, op in ipairs(list.operations or {}) do if op.id == pending_id then found = true end end
   expect(found, 'worktree.list lists the kept pending operation').to_be(true)
