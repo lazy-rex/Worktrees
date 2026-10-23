@@ -117,12 +117,14 @@ test('a More page with a malformed or out-of-range start', function()
   expect(result.tree.nodes[1].text).to_contain('No more entries')
 end)
 
-test('the final check covers every route, with the form status: a view over 48 KiB fails with too_large', function()
-  -- The Remove Worktree picker lists every removable tree; 400 verbose rows do not fit.
+test('the final check covers every route, with the form status: a view over the SDK limit fails with too_large', function()
+  -- The Remove Worktree picker lists every removable tree; 400 verbose rows are over the limit of
+  -- the SDK for a reply to the hub (max_total, 786432 bytes).
   local s = sandbox(400)
   local result, err = render(s, '/forms/remove-worktree')
   expect(result, 'no reply that is too large').to_be(nil)
   expect(err and err.code).to_be('too_large')
+  expect(err.message).to_contain('the limit is 786432')
 end)
 
 -- boundary finds the length L whose entry fits 8 KiB only without the optional text: make(L) gives

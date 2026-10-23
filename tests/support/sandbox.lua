@@ -15,10 +15,12 @@
 -- s.rex_answers[method] = fn(args) gives the result of a Rex call (not client.perform).
 -- opts.keep keeps the SQL tables (a restart of the plugin). A hub_answers function may return nil
 -- and an error text: that call fails. s.sql(name, args) runs a hub.sql action (name: exec, query, ...).
+-- s.parted counts the replies that came in parts, and s.part_count is the part count of the last one
+-- (the sandbox joins them, as the hub does).
 -- s.order lists the hub actions in call order. s.pcalls counts the pcall calls of the plugin (s.load_pcalls: during the load).
 return function(plugin_dir, base, opts)
   opts = opts or {}
-  local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, on_hub = {}, hub_answers = {}, rex_answers = {},
+  local s = {handlers = {}, hub_errors = {}, calls = {}, order = {}, pcalls = 0, timers = {}, workers = {}, part_sets = {}, parted = 0, on_hub = {}, hub_answers = {}, rex_answers = {},
     agent = {principal = {kind = 'peer', pid = 4242}}}
   -- hub.sql runs on the plugin's database in the lab (the harness sql and sql_write), one statement
   -- at a time: a batch without a transaction is not atomic here. A transaction keeps its writes
@@ -108,11 +110,34 @@ return function(plugin_dir, base, opts)
           if not ok then return nil, tostring(result) end
           return {result = result}
         end
+        -- A reply over inline_max comes in parts (chunking v1.1): the sandbox keeps them, as the hub does.
+        if args.action == 'hub.reply.part' then
+          local p = args.args
+          s.part_sets[p.id] = s.part_sets[p.id] or {}
+          s.part_sets[p.id][p.index + 1] = p.data
+          return {result = {}}
+        end
         if args.action == 'hub.workers' then return {result = {workers = s.workers}} end
+        -- The SDK reads its reply limits from the hub.register reply (chunking v1.1, hub 1d95ee4); the
+        -- values of the hub (hub/cmd/hub/replyparts.go). An older SDK ignores them.
+        if args.action == 'hub.register' then return {result = {limits = {inline_max = 45056, part_bytes = 57344, max_total = 786432}}} end
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 'session'}} end
         return {result = {}}
       end
-      if method == 'client.reply' then s.reply = args end
+      if method == 'client.reply' then
+        -- A stub {lazyrex_parts = {id, count, bytes}}: the sandbox joins the parts and decodes the
+        -- result, as the hub does (hub/cmd/hub/replyparts.go). s.parted counts these replies.
+        local stub = type(args.result) == 'table' and args.result.lazyrex_parts
+        if stub then
+          local parts = s.part_sets[stub.id] or {}
+          assert(#parts == stub.count, 'the reply parts are missing')
+          local text = table.concat(parts)
+          assert(#text == stub.bytes, 'the reply parts have the wrong size')
+          args = {call_id = args.call_id, result = rex.json.decode(text)}
+          s.parted, s.part_count = s.parted + 1, stub.count
+        end
+        s.reply = args
+      end
       if s.rex_answers[method] then return s.rex_answers[method](args) end
       return {}
     end,

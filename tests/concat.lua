@@ -3,7 +3,8 @@
 -- docs/rex-protocol.md). The SDK replaces table.concat with a concat that has no limit
 -- (boot.lua; hub v0.4.1 and later), and the sandbox does the same. These lists can grow: a
 -- tree row with its workers, the worker set of a refresh, the unattributed workers of Forget, the
--- workers of a refused remove, and the reasons of the removal advice (a view still has its 48 KiB guard).
+-- workers of a refused remove, and the reasons of the removal advice (a view over the inline limit
+-- of one reply goes in parts).
 local tests_dir = H.args.file:match('^(.*)/[^/]*$')
 local load_sandbox = load_fixture(tests_dir .. '/support/sandbox.lua')
 local base = getfenv(1)
@@ -87,7 +88,7 @@ test('a remove that 3000 workers block is refused with their list', function()
   expect(reply.error.message:sub(-#('w' .. (n - 1) .. ' · ' .. tree .. '\nw' .. n .. ' · ' .. tree))).to_be('w' .. (n - 1) .. ' · ' .. tree .. '\nw' .. n .. ' · ' .. tree)
 end)
 
-test('removal advice with 2600 workers joins every reason; the view guard refuses a view over 48 KiB', function()
+test('removal advice with 2600 workers joins every reason; the SDK sends the view in parts', function()
   local route = '/forms/remove-worktree?path=' .. tree:gsub('/', '%%2F')
   local function advice(count)
     local s = sandbox()
@@ -97,11 +98,18 @@ test('removal advice with 2600 workers joins every reason; the view guard refuse
     s.hub_answers['hub.cwd.check'] = function() return {available = false, workers = use} end
     s:perform('view.render', {route = route})
     s:tick()
-    return s:perform('view.render', {route = route})
+    s.parted = 0
+    return s:perform('view.render', {route = route}), s
   end
-  -- The reasons are joined (no registry overflow); 2600 of them do not fit one view.
-  local reply = advice(2600)
-  expect(reply.error and reply.error.code, show(reply.error)).to_be('too_large')
+  -- The reasons are joined (no registry overflow). 2600 of them are over the inline limit of one
+  -- reply (45056 bytes), so the SDK sends the view in parts and the hub joins them.
+  local reply, s = advice(2600)
+  assert_true(reply.result, 'the form renders: ' .. show(reply.error))
+  expect(s.parted, 'the view came in parts').to_be(1)
+  expect(s.part_count >= 2, 'parts: ' .. tostring(s.part_count)).to_be(true)
+  local text = node(reply.result.tree, 'check').text
+  expect(select(2, text:gsub('\nWorker: w', ''))).to_be(2600)
+  expect(text:sub(-#'Worker: w2600 · /d')).to_be('Worker: w2600 · /d')
   -- 100 reasons fit: the text has each one, in order.
   reply = advice(100)
   assert_true(reply.result, 'the form renders: ' .. show(reply.error))
