@@ -77,9 +77,9 @@ test('a pending create in phase prepared completes on its retry; another agent r
   local path = W.root .. '/remove/' .. branch
   local common = W.real(repo .. '/.git')
   local state = W.catalog()
-  state.pending[W.part('alice') .. W.part(key)] = {kind = 'create', fingerprint = 'create/' .. W.part(repo) .. W.part(branch) .. W.part(''),
+  state.pending[W.part(alice.id) .. W.part(key)] = {kind = 'create', fingerprint = 'create/' .. W.part(repo) .. W.part(branch) .. W.part(''),
     repo = repo, common = common, path = path, branch = branch, commit = W.git(repo, 'rev-parse', 'HEAD'), created = true, phase = 'prepared',
-    actor = 'alice', created_at = '2026-10-22T00:00:00Z'}
+    actor = alice.id, created_at = '2026-10-22T00:00:00Z'}
   W.set_catalog(state)
   local t = create(alice, branch, key)
   expect(t.created).to_be(true)

@@ -186,9 +186,9 @@ test('lab: a panel of 300 trees arrives; More… pages, select and Discard work 
   local long = string.rep('x', 200)
   for i = 1, 300 do W.git(repo, 'worktree', 'add', '-q', '-b', string.format('p%03d-%s', i, long), string.format('%s/pages-lab/t%03d', W.root, i)) end
   local state = W.catalog()
-  local id = W.part('alice') .. W.part('pages-stopped')
+  local id = W.part(alice.id) .. W.part('pages-stopped')
   state.pending[id] = {kind = 'create', fingerprint = 'synthetic', repo = repo, common = W.real(repo .. '/.git'),
-    path = W.root .. '/pages-lab/stopped', branch = 'stopped', phase = 'prepared', actor = 'alice'}
+    path = W.root .. '/pages-lab/stopped', branch = 'stopped', phase = 'prepared', actor = alice.id}
   W.set_catalog(state)
   user:command('worktrees')
   local panel = user:view('/panels/worktrees')

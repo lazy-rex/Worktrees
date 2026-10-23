@@ -34,13 +34,13 @@ test('a fresh database has schema 7 and no meta table', function()
 end)
 
 test('a database at schema 6 goes to schema 7: meta goes, and every record stays', function()
-  local pending_id = part('alice') .. part('p1')
-  local op_key = part('alice') .. part('done')
-  local open_key = 'open/' .. part('alice') .. part('worktree-open/o1')
-  local discard_key = 'discard/' .. part('alice') .. part('d1')
+  local pending_id = part(alice.id) .. part('p1')
+  local op_key = part(alice.id) .. part('done')
+  local open_key = 'open/' .. part(alice.id) .. part('worktree-open/o1')
+  local discard_key = 'discard/' .. part(alice.id) .. part('d1')
   local before
   local pending_op = {kind = 'remove', phase = 'prepared', path = H.args.lab .. '/worktrees/x/none', fingerprint = 'remove/x',
-    actor = 'alice', created_at = '2026-10-22T00:00:00Z'}
+    actor = alice.id, created_at = '2026-10-22T00:00:00Z'}
   restart(function()
     sql_write('CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
     sql_write("INSERT INTO meta (name, value) VALUES ('kv_import', 'done')")
@@ -49,7 +49,7 @@ test('a database at schema 6 goes to schema 7: meta goes, and every record stays
     sql_write('INSERT INTO repos (common, repo) VALUES (?, ?)', {'/r/.git', '/r'})
     sql_write('INSERT INTO pending (id, op) VALUES (?, ?)', {pending_id, json.encode(pending_op)})
     sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {op_key, 'create/x', json.encode({path = '/r/done'})})
-    sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {open_key, json.encode({fingerprint = 'f', actor = 'alice', phase = 'ready'})})
+    sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {open_key, json.encode({fingerprint = 'f', actor = alice.id, phase = 'ready'})})
     sql_write('INSERT INTO reservations (key, record) VALUES (?, ?)', {discard_key, json.encode({fingerprint = 'g', id = pending_id})})
     expect(version(), 'the schema before the start').to_be(6)
     expect(tables(), 'the tables before the start').to_be('meta,' .. current)

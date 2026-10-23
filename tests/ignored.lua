@@ -66,7 +66,7 @@ test('accept_ignored is part of the key: a changed value conflicts; false and om
   expect_error(function() remove(path, 'key-1', false) end, 'ignored files')
   expect_error(function() alice:call('worktree.remove', {path = path, key = 'key-2', accept_ignored = 'yes'}) end, 'must be boolean')
   -- A saved result whose fingerprint has no option part replays for omitted and for false.
-  local id = W.part('alice') .. W.part('key-saved')
+  local id = W.part(alice.id) .. W.part('key-saved')
   W.put_op(id, 'remove/' .. W.part(path), {path = path, removed = true})
   expect(remove(path, 'key-saved').removed).to_be(true)
   expect(remove(path, 'key-saved', false).removed).to_be(true)
@@ -79,7 +79,7 @@ test('a pending remove with accept_ignored keeps it across a crash restart', fun
   with_log(path)
   local args = {path = path, key = 'restart', accept_ignored = true}
   expect(alice:call('worktree.remove', args).status).to_be('running')
-  local op = (W.catalog().pending or {})[W.part('alice') .. W.part('restart')]
+  local op = (W.catalog().pending or {})[W.part(alice.id) .. W.part('restart')]
   expect(op.accept_ignored).to_be(true)
   hub:restart({crash = true})
   expect(W.settle(function() return alice:call('worktree.remove', args) end).removed).to_be(true)

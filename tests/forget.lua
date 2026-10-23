@@ -70,9 +70,9 @@ test('a healthy repository: refused for a worker in its tree and for an unfinish
   expect_error(function() forget(healthy, 'f-healthy') end, 'refused')
   stop(main_worker)
   local state = W.catalog()
-  local id = W.part('alice') .. W.part('stopped')
+  local id = W.part(alice.id) .. W.part('stopped')
   state.pending[id] = {kind = 'create', fingerprint = 'synthetic', repo = healthy, common = W.real(healthy .. '/.git'),
-    path = W.root .. '/healthy/stopped', branch = 'stopped', phase = 'prepared', actor = 'alice'}
+    path = W.root .. '/healthy/stopped', branch = 'stopped', phase = 'prepared', actor = alice.id}
   W.set_catalog(state)
   err = expect_error(function() forget(healthy, 'f-healthy') end, 'refused')
   expect(err.message).to_match('unfinished operation')

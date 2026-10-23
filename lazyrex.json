@@ -4,24 +4,6 @@
  "sdk": "0",
  "events": "all",
  "test": {
-  "agents": [
-   {
-    "id": "alice",
-    "name": "Alice"
-   },
-   {
-    "id": "bob",
-    "name": "Bob"
-   },
-   {
-    "id": "carol",
-    "name": "Carol"
-   },
-   {
-    "id": "dave",
-    "name": "Dave"
-   }
-  ],
   "env": {
    "GIT_TRACE": "${LAB}/git-trace.log"
   },

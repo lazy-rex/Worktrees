@@ -9,7 +9,7 @@ local alice = agent('alice')
 
 write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
 
-local function id(key) return W.part('alice') .. W.part(key) end
+local function id(key) return W.part(alice.id) .. W.part(key) end
 local function pending(key) return ((W.catalog() or {}).pending or {})[id(key)] end
 -- worktrees_with counts the worktrees of a branch (git worktree list --porcelain).
 local function worktrees_with(branch)

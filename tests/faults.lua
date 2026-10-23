@@ -36,7 +36,7 @@ local function menu(path)
   m:render()
   return m
 end
-local function id(key) return W.part('alice') .. W.part(key) end
+local function id(key) return W.part(alice.id) .. W.part(key) end
 
 local tree = create('faults/one', 'one')
 

@@ -10,7 +10,7 @@ local alice = agent('alice')
 
 write_profiles({profiles = {{id = 'sleep', name = 'Sleep', kind = 'accessory', command = {'/bin/sleep', '600'}}}})
 
-local function id(key) return W.part('alice') .. W.part(key) end
+local function id(key) return W.part(alice.id) .. W.part(key) end
 local function pending(key) return ((W.catalog() or {}).pending or {})[id(key)] end
 local function settle(fn) return W.settle(fn, 'the operation', 30) end
 local function create(key, branch) return settle(function() return alice:call('worktree.create', {key = key, repo = repo, branch = branch}) end) end

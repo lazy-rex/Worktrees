@@ -43,7 +43,7 @@ test('a failed hook with 300 KB of output: the error is kept within 4 KiB; a ret
   expect(message:find('LAST é', 1, true) ~= nil, 'the end of the output').to_be(true)
   expect(message:find('"q" \\', 1, true) ~= nil, 'escaped characters').to_be(true)
   expect(valid_utf8(message), 'whole characters').to_be(true)
-  expect(W.catalog().pending[W.part('alice') .. W.part('loud')], 'the operation is not pending').to_be(nil)
+  expect(W.catalog().pending[W.part(alice.id) .. W.part('loud')], 'the operation is not pending').to_be(nil)
   local before = adds()
   expect(before).to_be(1)
   local again = expect_error(create, 'git_error')

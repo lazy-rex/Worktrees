@@ -117,8 +117,8 @@ test('long escaped text in both lists: every page is within budget; the reply ha
   local text = string.rep('"\\\t', 400)
   for i = 1, 15 do
     local key = string.format('long-op-%02d', i)
-    state.pending[W.part('alice') .. W.part(key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. text .. i,
-      branch = 'op', repo = long, common = W.real(long .. '/.git'), actor = 'alice', fingerprint = 'synthetic/' .. key}
+    state.pending[W.part(alice.id) .. W.part(key)] = {kind = 'remove', phase = 'prepared', path = W.root .. '/' .. text .. i,
+      branch = 'op', repo = long, common = W.real(long .. '/.git'), actor = alice.id, fingerprint = 'synthetic/' .. key}
   end
   W.set_catalog(state)
   local _, order, count, first = pages(long)
