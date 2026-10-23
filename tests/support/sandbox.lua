@@ -118,8 +118,8 @@ return function(plugin_dir, base, opts)
           return {result = {}}
         end
         if args.action == 'hub.workers' then return {result = {workers = s.workers}} end
-        -- The SDK reads its reply limits from the hub.register reply (chunking v1.1, hub 1d95ee4); the
-        -- values of the hub (hub/cmd/hub/replyparts.go). An older SDK ignores them.
+        -- The SDK reads its reply limits from the hub.register reply (chunking v1.1, hub 1d95ee4): the
+        -- values of the hub (hub/cmd/hub/replyparts.go).
         if args.action == 'hub.register' then return {result = {limits = {inline_max = 45056, part_bytes = 57344, max_total = 786432}}} end
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 'session'}} end
         return {result = {}}
