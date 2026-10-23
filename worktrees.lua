@@ -105,8 +105,15 @@ local function status_refusal(stdout)
 end
 local function identity(path)
   local dir = real(line(checked({'git', '-C', path, 'rev-parse', '--absolute-git-dir'})))
-  -- Rex runs on macOS. Birth time and inode distinguish a replacement at the same path.
-  return dir .. '\n' .. checked({'stat', '-f', '%d:%i:%B', dir})
+  -- Device, inode and birth time distinguish a replacement at the same path. BSD stat (macOS)
+  -- first, so the identities that macOS records do not change. GNU stat (Linux) reads -f as file
+  -- system status and fails; then -c gives the same fields. GNU %W is 0, or '-' on some builds,
+  -- when the file system has no birth time: then the identity is device:inode:0. One host uses one
+  -- form, so a recorded identity is compared only with the same form.
+  local r = run({'stat', '-f', '%d:%i:%B', dir})
+  if r.ok then return dir .. '\n' .. r.stdout end
+  local gnu = checked({'stat', '-c', '%d:%i:%W', dir})
+  return dir .. '\n' .. (gnu:gsub(':%-(\n?)$', ':0%1'))
 end
 -- The records (hub.sql): the recorded repositories (Git common directory -> main tree), the
 -- pending operations (the operation record as JSON), the saved operation results, and the

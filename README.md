@@ -77,6 +77,11 @@ ignored files**), Git deletes the ignored files with the tree. Changes and untra
 refuse removal (observed with Git 2.54.0). `accept_ignored` is part of the request content of its
 key, so a refusal without it needs a new key.
 
+A remove records the identity of the tree's Git directory: its path, device, inode and birth time.
+A retry compares it, so a different tree at the same path is a conflict, not a removal. macOS gives
+the fields with `stat -f %d:%i:%B`, Linux with `stat -c %d:%i:%W`. On a Linux file system without a
+birth time, the birth time is 0, so there the identity is the path, device and inode only.
+
 ## Forget repository
 
 The menu of a repository row (its main tree, or the unavailable row of a repository that Git
