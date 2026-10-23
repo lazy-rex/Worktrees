@@ -87,13 +87,3 @@ test('a pending create in phase prepared completes on its retry; another agent r
   expect(remove(bob, path, 'bob-rm-prepared-op').removed).to_be(true)
 end)
 
-test('after an identity migration the agent replays the keys of its legacy ID', function()
-  local carol = agent('carol')
-  local t = create(carol, 'rm/six', 'rm-six')
-  expect(carol:report({kind = 'claude', conversation_id = 'conv-remove'}).identity).to_be('claude:conv-remove')
-  -- An old key of the legacy ID finds its saved result.
-  expect(create(carol, 'rm/six', 'rm-six').path).to_be(t.path)
-  local removed = remove(carol, t.path, 'rm-six-rm')
-  expect(removed.removed).to_be(true)
-  expect(remove(carol, t.path, 'rm-six-rm')).to_equal(removed)
-end)

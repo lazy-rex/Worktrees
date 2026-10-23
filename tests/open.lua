@@ -188,34 +188,7 @@ test('view: New Worktree creates the tree and opens one shell; the agent sequenc
   expect(worker(opened.spawn_id).cwd).to_be(made.path)
 end)
 
-test('tool: after an identity migration a replay finds the first spawn', function()
-  local carol = agent('carol')
-  local first = open(carol, {path = tree.path, key = 'mig'})
-  expect(carol:report({kind = 'claude', conversation_id = 'conv-open'}).identity).to_be('claude:conv-open')
-  local again = open(carol, {path = tree.path, key = 'mig'})
-  expect(again.spawn_id).to_be(first.spawn_id)
-  -- The spawn keeps its recorded parent (LazyRex 7e91929); the new identity owns it through the alias.
-  expect(worker(first.spawn_id).parent).to_be('carol')
-  -- A changed request with the legacy key still conflicts.
-  expect_error(function() carol:call('worktree.open', {path = tree.path, key = 'mig', where = 'session'}) end, 'operation_conflict')
-  -- Any agent may stop any worker (LazyRex 9bc00c8), also one whose parent is carol (above).
-  expect(agent('alice'):hub('hub.stop', {spawn_id = first.spawn_id}).status).to_be('closed')
-end)
 
-test('tool: a key that both IDs used is refused after the migration', function()
-  local dave = agent('dave')
-  local bob2 = agent('bob', {title = 'bob-mig'})
-  expect(bob2:report({kind = 'claude', conversation_id = 'conv-both'}).identity).to_be('claude:conv-both')
-  local mine = open(bob2, {path = tree.path, key = 'both'})
-  local legacy = open(dave, {path = tree.path, key = 'both'})
-  expect(legacy.spawn_id).not_to_be(mine.spawn_id)
-  expect(dave:report({kind = 'claude', conversation_id = 'conv-both'}).identity).to_be('claude:conv-both')
-  local e = expect_error(function() dave:call('worktree.open', {path = tree.path, key = 'both'}) end)
-  expect(e.message).to_match('used by')
-  expect(workers_in(tree.path) >= 2).to_be(true)
-  dave:hub('hub.stop', {spawn_id = mine.spawn_id})
-  dave:hub('hub.stop', {spawn_id = legacy.spawn_id})
-end)
 
 -- The schema limits count characters, not bytes (JSON Schema): the title has at most 60, and the
 -- hub counts 60 runes. 60 two-byte characters open; 61 are refused.

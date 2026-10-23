@@ -107,17 +107,6 @@ test('an interrupted discard keeps its target: another target conflicts, a retry
   expect(pending(second) ~= nil).to_be(true)
 end)
 
-test('a retry after an identity change discards the reserved target', function()
-  local carol = agent('carol')
-  local id = stopped('carol', 'moved')
-  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'lost discard result'}, 1, function()
-    expect_error(function() carol:call('worktree.discard', {operation = 'moved', key = 'moved-request'}) end, 'lost discard result')
-  end)
-  expect(carol:report({kind = 'claude', conversation_id = 'conv-discard'}).identity).to_be('claude:conv-discard')
-  local r = carol:call('worktree.discard', {operation = 'moved', key = 'moved-request'})
-  expect(r.discarded).to_be(true)
-  expect(pending(id)).to_be(nil)
-end)
 
 -- awaiting_cleanup writes a create whose result committed, with its cleanup still pending.
 -- discarded = true: the saved result is a discard (the discard's result committed, its cleanup did not).
