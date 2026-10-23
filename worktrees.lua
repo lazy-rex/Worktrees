@@ -242,24 +242,16 @@ end
 local function save_op(key, fingerprint, result)
   return {{'INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', key, fingerprint, json.encode(result)}}
 end
--- reservation gives the record of the first key of keys that has one (the keys of the caller's aliases).
-local function reservation(keys)
-  for _, key in ipairs(keys) do
-    local r = db.first('SELECT record FROM reservations WHERE key = ?', key)
-    if r then return json.decode(r.record), key end
-  end
+local function reservation(key)
+  local r = db.first('SELECT record FROM reservations WHERE key = ?', key)
+  if r then return json.decode(r.record) end
 end
 local function reservation_row(key, record) return {{'INSERT OR REPLACE INTO reservations (key, record) VALUES (?, ?)', key, json.encode(record)}} end
 local function put_reservation(key, record) write(reservation_row(key, record)) end
--- A caller is the user (the view path) or an agent (the SDK ctx). aliases are the agent ID and its
--- legacy IDs (ctx.aliases) after an identity migration, current first. An operation ID is part(actor)..part(key).
-local user_caller = {agent = 'user', aliases = {'user'}, user = true}
+-- A caller is the user (the view path) or an agent (the SDK ctx). An operation ID is part(actor)..part(key).
+local user_caller = {agent = 'user', user = true}
 local function agent_caller(ctx)
-  local aliases, seen = {ctx.agent}, {[ctx.agent] = true}
-  for _, id in ipairs(type(ctx.aliases) == 'table' and ctx.aliases or {}) do
-    if type(id) == 'string' and id ~= '' and not seen[id] then aliases[#aliases + 1] = id; seen[id] = true end
-  end
-  return {agent = ctx.agent, aliases = aliases, session = ctx.session_id}
+  return {agent = ctx.agent, session = ctx.session_id}
 end
 local function rex_ok(method, args)
   local result, err = rex.call(method, args)
@@ -513,8 +505,7 @@ local function remove(caller, id, fingerprint, args, pending)
   end
   return finish(id, op, {path = op.path, repo = op.repo, branch = op.branch, removed = true})
 end
--- An operation key belongs to its caller. After an identity migration, a key of a legacy ID
--- still finds its saved result or its pending operation; a new key uses the current ID.
+-- An operation key belongs to its caller.
 local function mutate(caller, kind, args)
   local key = text(args.key, 'key')
   local fingerprint
@@ -525,16 +516,10 @@ local function mutate(caller, kind, args)
     -- accept_ignored = true is part of the content. Omitted or false adds nothing to the fingerprint.
     fingerprint = 'remove/' .. part(text(args.path, 'path')) .. (args.accept_ignored and part('accept_ignored') or '')
   end
-  for _, alias in ipairs(caller.aliases) do
-    local id = part(alias) .. part(key)
-    local saved = saved_op(id)
-    if saved.found then cleanup_done(id); return result_of(saved, fingerprint) end
-  end
-  local id, pending = part(caller.agent) .. part(key), nil
-  for _, alias in ipairs(caller.aliases) do
-    local found = pending_op(part(alias) .. part(key))
-    if found then id, pending = part(alias) .. part(key), found; break end
-  end
+  local id = part(caller.agent) .. part(key)
+  local saved = saved_op(id)
+  if saved.found then cleanup_done(id); return result_of(saved, fingerprint) end
+  local pending = pending_op(id)
   if pending and pending.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
   if kind == 'create' then return create(caller, id, fingerprint, args, pending) end
   return remove(caller, id, fingerprint, args, pending)
@@ -572,10 +557,10 @@ end
 -- - id: a full operation ID, any pending operation: an agent may discard what the user can (decision
 --   "LazyRex trusts agents to act across creator boundaries while retaining validation and replay
 --   checks"). The panel uses id.
--- - operation: an operation key of the caller, resolved through its aliases (its own operations).
+-- - operation: an operation key of the caller (its own operations).
 -- The request key reserves its target before the target changes: a reservation
 -- discard/<part(actor)><part(key)> = {fingerprint, id}. The request key is the caller's own. A retry
--- with the same key discards the reserved ID again, also after an alias change; another target or
+-- with the same key discards the reserved ID again; another target or
 -- the other selector with the same key conflicts, also after an interruption. discard() derives
 -- the result from the target, so the record holds no result.
 local function discard_request(caller, selector, key)
@@ -584,23 +569,18 @@ local function discard_request(caller, selector, key)
   local target = by_id and text(selector.id, 'id') or text(selector.operation, 'operation')
   key = text(key, 'key')
   local fingerprint = 'discard-v1/' .. part(by_id and 'id' or 'key') .. part(target)
-  local record_keys = {}
-  for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'discard/' .. part(alias) .. part(key) end
-  local record = reservation(record_keys)
+  local record_key = 'discard/' .. part(caller.agent) .. part(key)
+  local record = reservation(record_key)
   if record then
     if record.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
     return discard(record.id)
   end
   local id = target
   if by_key then
-    id = nil
-    for _, alias in ipairs(caller.aliases) do
-      local candidate = part(alias) .. part(target)
-      if not id and (pending_op(candidate) or saved_op(candidate).found) then id = candidate end
-    end
-    if not id then fail('not_found', 'You have no operation with this key') end
+    id = part(caller.agent) .. part(target)
+    if not (pending_op(id) or saved_op(id).found) then fail('not_found', 'You have no operation with this key') end
   end
-  put_reservation(record_keys[1], {fingerprint = fingerprint, id = id})
+  put_reservation(record_key, {fingerprint = fingerprint, id = id})
   return discard(id)
 end
 local snapshots = {}
@@ -910,14 +890,10 @@ local function forget(caller, args, shown)
     fail('invalid_input', 'accept_unattributed must be a boolean')
   end
   local fingerprint = 'forget/' .. part(repo)
-  for _, alias in ipairs(caller.aliases) do
-    local saved = saved_op(part(alias) .. part(key))
-    if saved.found then return result_of(saved, fingerprint) end
-  end
+  local saved = saved_op(part(caller.agent) .. part(key))
+  if saved.found then return result_of(saved, fingerprint) end
   local state = catalog()
-  for _, alias in ipairs(caller.aliases) do
-    if state.pending[part(alias) .. part(key)] then fail('operation_conflict', 'This key has different content') end
-  end
+  if state.pending[part(caller.agent) .. part(key)] then fail('operation_conflict', 'This key has different content') end
   local commons, unattributed, set_key = forget_check(state, repo)
   if shown ~= nil and shown ~= set_key then return {changed = true} end
   if unattributed[1] and args.accept_unattributed ~= true then
@@ -1564,13 +1540,9 @@ local function open_request(caller, req, keys, view, requester_pid, branch_title
   if #keys.spawn > 128 or #keys.ensure > 1024 then fail('invalid_input', 'The operation key is too long') end
   req = {path = path, where = where, profile = profile_id, title = req.title, args = named}
   local fingerprint = open_fingerprint(req)
-  -- One record per caller and spawn key. After an identity migration, the record of a legacy ID
-  -- is the same operation: the hub moves that ID's spawns to the identity, so hub.spawn replays
-  -- the first spawn (and refuses a key that both IDs used).
-  local record_keys = {}
-  for _, alias in ipairs(caller.aliases) do record_keys[#record_keys + 1] = 'open/' .. part(alias) .. part(keys.spawn) end
-  local intent, own_key = reservation(record_keys)
-  own_key = own_key or record_keys[1]
+  -- One record per caller and spawn key.
+  local own_key = 'open/' .. part(caller.agent) .. part(keys.spawn)
+  local intent = reservation(own_key)
   if intent and intent.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
   if not intent then
     local tree = find_known(path)
