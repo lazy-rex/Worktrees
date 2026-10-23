@@ -28,17 +28,22 @@ until then. A plain `worktree.list` call does not start a new lookup.
 
 ## Panel pages
 
-A view reply that is too large never arrives (one Rex control message is 64 KiB), so each view
-of the plugin encodes to at most 48 KiB. The panel shows the tree rows (the source repository
-first) and then the stopped operations, as many as fit. If more remain, **More…** opens the next
-page; on that page, a row opens its menu, and Discard works as on the panel. If the list changes
-between pages, a page can repeat or skip an entry.
+The panel and its **More…** pages each encode to at most 48 KiB (the page budget of the plugin).
+The panel shows the tree rows (the source repository first) and then the stopped operations, as
+many as fit. If more remain, **More…** opens the next page; on that page, a row opens its menu, and
+Discard works as on the panel. If the list changes between pages, a page can repeat or skip an
+entry.
 
 Long texts are cut. A row or an operation that is still too large loses its label and detail
 first. Only when its exact ID does not fit (a very long path, or an operation key of many KiB)
 does it show as a placeholder without an action: discard such an operation with
 `worktree.discard` and its full operation ID (`worktree.list` lists it), or with its operation key
-as its caller. Another view that is still over 48 KiB fails with `too_large`.
+as its caller.
+
+The page budget is not a limit of the hub. The SDK sends a view over 45056 bytes (its inline
+limit) to the hub in parts, and the hub joins them. A view over 786432 bytes (768 KiB, the reply
+limit) fails with `too_large`. The hub gives both limits in the `hub.register` reply (hub release
+4.2; hub main cd53575). The forms have no page budget: only the reply limit applies to them.
 
 ## Scans
 

@@ -1255,13 +1255,13 @@ end
 local function cancel_node()
   return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = 'Cancel', enabled = true}}
 end
--- Panel pages. A view reply that is too large never arrives: the hub keeps the old tree (hub
--- docs/rex-protocol.md, "Rex Lua runtime": one control message is 64 KiB). So a rendered view
--- encodes to at most 48 KiB ({tree = tree}, the status included), and each entry (a tree row or a
--- stopped operation) to at most 8 KiB. The panel shows the entries that fit; More… opens the form
--- /forms/worktrees-more?start=<n> with the next ones. Every text is cut; an entry that is still
--- too large loses its optional text, and only an entry whose exact ID does not fit becomes a
--- placeholder without an action.
+-- Panel pages. A rendered panel page encodes to at most 48 KiB ({tree = tree}, the status included:
+-- the page budget), and each entry (a tree row or a stopped operation) to at most 8 KiB. The panel
+-- shows the entries that fit; More… opens the form /forms/worktrees-more?start=<n> with the next
+-- ones. Every text is cut; an entry that is still too large loses its optional text, and only an
+-- entry whose exact ID does not fit becomes a placeholder without an action. The page budget is not
+-- the limit of the SDK: the SDK sends a reply over its inline limit (45056 bytes) in parts, and its
+-- reply limit is max_total (README, "Panel pages").
 local view_bytes, entry_bytes = 49152, 8192
 local function select_action(enabled) return {name = 'select', label = 'Actions…', enabled = enabled, user_only = 'navigation'} end
 local function tree_entry(tree, n)
@@ -1503,8 +1503,8 @@ local function ui_render(args)
   elseif base:sub(1, 22) == '/forms/worktree-agent/' then tree = render_agent(base:sub(23), path)
   else fail('invalid_input', 'Unknown route') end
   if base:sub(1, 7) == '/forms/' then tree.status = {state = 'blocked', kind = 'question', msg = 'Waiting for input'} end
-  -- The SDK checks the final size of each view, with the status (48 KiB): a larger view fails
-  -- with too_large, because a reply that is too large never arrives.
+  -- The SDK checks the final size of each view, with the status: a view over its reply limit
+  -- (max_total) fails with too_large.
   return tree
 end
 
