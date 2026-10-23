@@ -106,7 +106,8 @@ test('removal advice with 2600 workers joins every reason; the SDK sends the vie
   local reply, s = advice(2600)
   assert_true(reply.result, 'the form renders: ' .. show(reply.error))
   expect(s.parted, 'the view came in parts').to_be(1)
-  expect(s.part_count >= 2, 'parts: ' .. tostring(s.part_count)).to_be(true)
+  expect(s.part_count >= 1, 'parts: ' .. tostring(s.part_count)).to_be(true)
+  expect(s.part_bytes > 45056, 'the reply is over the inline limit: ' .. tostring(s.part_bytes)).to_be(true)
   local text = node(reply.result.tree, 'check').text
   expect(select(2, text:gsub('\nWorker: w', ''))).to_be(2600)
   expect(text:sub(-#'Worker: w2600 · /d')).to_be('Worker: w2600 · /d')

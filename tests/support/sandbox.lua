@@ -15,8 +15,8 @@
 -- s.rex_answers[method] = fn(args) gives the result of a Rex call (not client.perform).
 -- opts.keep keeps the SQL tables (a restart of the plugin). A hub_answers function may return nil
 -- and an error text: that call fails. s.sql(name, args) runs a hub.sql action (name: exec, query, ...).
--- s.parted counts the replies that came in parts, and s.part_count is the part count of the last one
--- (the sandbox joins them, as the hub does).
+-- s.parted counts the replies that came in parts; s.part_count and s.part_bytes are the part count and
+-- the joined size of the last one (the sandbox joins them, as the hub does).
 -- s.order lists the hub actions in call order. s.pcalls counts the pcall calls of the plugin (s.load_pcalls: during the load).
 return function(plugin_dir, base, opts)
   opts = opts or {}
@@ -134,7 +134,7 @@ return function(plugin_dir, base, opts)
           local text = table.concat(parts)
           assert(#text == stub.bytes, 'the reply parts have the wrong size')
           args = {call_id = args.call_id, result = rex.json.decode(text)}
-          s.parted, s.part_count = s.parted + 1, stub.count
+          s.parted, s.part_count, s.part_bytes = s.parted + 1, stub.count, stub.bytes
         end
         s.reply = args
       end
