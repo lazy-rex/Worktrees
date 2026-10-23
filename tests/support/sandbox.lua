@@ -154,7 +154,16 @@ return function(plugin_dir, base, opts)
   -- Count only from the main chunk of the plugin on: the SDK module itself can run a pcall when it
   -- loads (observed on hub d912148: pcall(install), the read-tracking wrappers).
   s.pcalls = 0
-  env.require = function(name) if name == 'lazyrex' then return lazyrex end return base.require(name) end
+  -- s.migrations lists the arguments of each app.db.migrate call of the plugin, in call order.
+  s.migrations = {}
+  local plugin = lazyrex.plugin
+  local sdk_api = setmetatable({plugin = function(...)
+    local app = plugin(...)
+    local migrate = app.db.migrate
+    app.db.migrate = function(list) s.migrations[#s.migrations + 1] = list; return migrate(list) end
+    return app
+  end}, {__index = lazyrex})
+  env.require = function(name) if name == 'lazyrex' then return sdk_api end return base.require(name) end
   local chunk = assert(loadfile(plugin_dir .. '/worktrees.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)

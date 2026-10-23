@@ -121,16 +121,22 @@ end
 -- Rex runs one handler at a time, and the hub fences an old instance, so a read and the writes
 -- after it see no other writer. Each phase commit is one write (all or nothing).
 local db, json = app.db, rex.json
-db.migrate {
-  'CREATE TABLE repos (common TEXT PRIMARY KEY, repo TEXT NOT NULL)',
-  'CREATE TABLE pending (id TEXT PRIMARY KEY, op TEXT NOT NULL)',
-  'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
-  'CREATE TABLE reservations (key TEXT PRIMARY KEY, record TEXT NOT NULL)',
-  -- meta kept the state of the one-time copy of the hub.store records (v0.3.0). Step 7 drops it.
-  'CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)',
-  -- The values of one write that do not fit a statement (write).
-  'CREATE TABLE staging (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)',
-  -- v0.4.0 does not read meta, so a rollback to v0.4.0 runs at schema 7. v0.3.0 reads it.
+-- Schema 6 is one base step: a new database gets it in one transaction. Steps 1 to 6 shipped in
+-- v0.4.0 and in the 4.2 pin (0f6cb11); every live database is at version 6 or above. A database
+-- at a version from 1 to 5 does not start (docs/plugin-sdk.md, "A base step"). tests/schema.lua
+-- compares the base with the old steps 1 to 6.
+db.migrate {base = 6,
+  function(d)
+    d.exec('CREATE TABLE repos (common TEXT PRIMARY KEY, repo TEXT NOT NULL)')
+    d.exec('CREATE TABLE pending (id TEXT PRIMARY KEY, op TEXT NOT NULL)')
+    d.exec('CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)')
+    d.exec('CREATE TABLE reservations (key TEXT PRIMARY KEY, record TEXT NOT NULL)')
+    -- meta kept the state of the one-time copy of the hub.store records (v0.3.0). Step 7 drops it.
+    d.exec('CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    -- The values of one write that do not fit a statement (write).
+    d.exec('CREATE TABLE staging (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)')
+  end,
+  -- Version 7. v0.4.0 does not read meta, so a rollback to v0.4.0 runs at schema 7. v0.3.0 reads it.
   'DROP TABLE meta',
 }
 -- rows reads every row of a query; a reply that the hub cut (about 1 MB) is an error.
